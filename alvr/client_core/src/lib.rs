@@ -1,9 +1,9 @@
 #![allow(non_upper_case_globals, non_snake_case, clippy::missing_safety_doc)]
 
 mod connection;
-mod connection_utils;
 mod logging_backend;
 mod platform;
+mod sockets;
 mod statistics;
 
 #[cfg(target_os = "android")]
@@ -22,17 +22,22 @@ use alvr_common::{
 use alvr_events::ButtonValue;
 use alvr_session::{AudioDeviceId, Fov};
 use alvr_sockets::{
-    BatteryPacket, ClientControlPacket, ClientStatistics, DeviceMotion, HeadsetInfoPacket,
-    Tracking, ViewsConfig,
+    BatteryPacket, ClientStatistics, DeviceMotion, RequestPacket,
+    ResponsePacket, Tracking, ViewsConfig,
 };
 use jni::objects::{GlobalRef, ReleaseMode};
+use sockets::RequestSocket;
 use statistics::StatisticsManager;
 use std::{
     collections::VecDeque,
     ffi::{c_void, CStr},
     os::raw::c_char,
     ptr, slice,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
 use tokio::{runtime::Runtime, sync::mpsc, sync::Notify};
@@ -41,25 +46,37 @@ use tokio::{runtime::Runtime, sync::mpsc, sync::Notify};
 // ndk-glue instead
 static GLOBAL_ASSET_MANAGER: OnceCell<GlobalRef> = OnceCell::new();
 
-static STATISTICS_MANAGER: Lazy<Mutex<Option<StatisticsManager>>> = Lazy::new(|| Mutex::new(None));
-
-static RUNTIME: Lazy<Mutex<Option<Runtime>>> = Lazy::new(|| Mutex::new(None));
-static TRACKING_SENDER: Lazy<Mutex<Option<mpsc::UnboundedSender<Tracking>>>> =
-    Lazy::new(|| Mutex::new(None));
-static STATISTICS_SENDER: Lazy<Mutex<Option<mpsc::UnboundedSender<ClientStatistics>>>> =
-    Lazy::new(|| Mutex::new(None));
-static CONTROL_CHANNEL_SENDER: Lazy<Mutex<Option<mpsc::UnboundedSender<ClientControlPacket>>>> =
-    Lazy::new(|| Mutex::new(None));
-static ON_DESTROY_NOTIFIER: Lazy<Notify> = Lazy::new(Notify::new);
+static EVENT_BUFFER: Lazy<Mutex<VecDeque<AlvrEvent>>> = Lazy::new(|| Mutex::new(VecDeque::new()));
 
 static DECODER_REF: Lazy<Mutex<Option<GlobalRef>>> = Lazy::new(|| Mutex::new(None));
 static IDR_PARSED: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
 static STREAM_TEAXTURE_HANDLE: Lazy<Mutex<i32>> = Lazy::new(|| Mutex::new(0));
-static PREFERRED_RESOLUTION: Lazy<Mutex<UVec2>> = Lazy::new(|| Mutex::new(UVec2::ZERO));
+static DEFAULT_VIEW_RESOLUTION: Lazy<Mutex<UVec2>> = Lazy::new(|| Mutex::new(UVec2::ZERO));
+// static AVAILABLE_REFRESH_RATES: Lazy<Mutex<Vec<f32>>> = Lazy::new(|| Mutex::new(vec![]));
+// static MICROPHONE_SAMPLE_RATE: Lazy<Mutex<Vec<f32>>> = Lazy::new(|| Mutex::new(vec![]));
 
-static EVENT_BUFFER: Lazy<Mutex<VecDeque<AlvrEvent>>> = Lazy::new(|| Mutex::new(VecDeque::new()));
-
+static IS_ALIVE: Lazy<Arc<RelaxedAtomic>> = Lazy::new(|| Arc::new(RelaxedAtomic::new(true)));
 static IS_RESUMED: Lazy<RelaxedAtomic> = Lazy::new(|| RelaxedAtomic::new(false));
+static SHOULD_STREAM: Lazy<RelaxedAtomic> = Lazy::new(|| RelaxedAtomic::new(false));
+
+static CONNECTION_THREAD: Lazy<Mutex<Option<JoinHandle<()>>>> = Lazy::new(|| Mutex::new(None));
+static REQUEST_SOCKET: Lazy<Mutex<Option<RequestSocket>>> = Lazy::new(|| Mutex::new(None));
+
+static STATISTICS_MANAGER: Lazy<Mutex<Option<StatisticsManager>>> = Lazy::new(|| Mutex::new(None));
+
+static TRACKING_SENDER: Lazy<Mutex<Option<mpsc::UnboundedSender<Tracking>>>> =
+    Lazy::new(|| Mutex::new(None));
+static STATISTICS_SENDER: Lazy<Mutex<Option<mpsc::UnboundedSender<ClientStatistics>>>> =
+    Lazy::new(|| Mutex::new(None));
+
+// Blocking call but interrupted by IS_ALIVE == false
+fn request(message: RequestPacket) -> IntResult<ResponsePacket> {
+    if let Some(socket) = &mut *REQUEST_SOCKET.lock() {
+        socket.request(message)
+    } else {
+        int_fmt_e!("Request failed: no socket available")
+    }
+}
 
 #[repr(u8)]
 pub enum AlvrEvent {
@@ -153,20 +170,16 @@ pub extern "C" fn alvr_log_time(tag: *const c_char) {
 pub extern "C" fn alvr_initialize(
     java_vm: *mut c_void,
     context: *mut c_void,
-    recommended_eye_width: u32,
-    recommended_eye_height: u32,
+    default_view_width: u32,
+    default_view_height: u32,
     refresh_rates: *const f32,
     refresh_rates_count: i32,
 ) {
     unsafe { ndk_context::initialize_android_context(java_vm, context) };
     logging_backend::init_logging();
 
-    error!("alvr_initialize");
-
     extern "C" fn video_error_report_send() {
-        if let Some(sender) = &*CONTROL_CHANNEL_SENDER.lock() {
-            sender.send(ClientControlPacket::VideoErrorReport).ok();
-        }
+        request(RequestPacket::VideoErrorReport).ok();
     }
 
     extern "C" fn push_nal(buffer: *const c_char, length: i32, frame_index: u64) {
@@ -261,52 +274,27 @@ pub extern "C" fn alvr_initialize(
     };
     *STREAM_TEAXTURE_HANDLE.lock() = result.streamSurfaceHandle;
 
+    // store a reference to avoid
     GLOBAL_ASSET_MANAGER
         .set(asset_manager)
         .map_err(|_| ())
         .unwrap();
 
-    *PREFERRED_RESOLUTION.lock() = UVec2::new(recommended_eye_width, recommended_eye_height);
+    let default_view_resolution = UVec2::new(default_view_width, default_view_height);
+    *DEFAULT_VIEW_RESOLUTION.lock() = default_view_resolution;
 
-    let available_refresh_rates =
+    let supported_refresh_rates =
         unsafe { slice::from_raw_parts(refresh_rates, refresh_rates_count as _).to_vec() };
-    let preferred_refresh_rate = available_refresh_rates.last().cloned().unwrap_or(60_f32);
 
-    let microphone_sample_rate =
-        AudioDevice::new(None, AudioDeviceId::Default, AudioDeviceType::Input)
-            .unwrap()
-            .input_sample_rate()
-            .unwrap();
-
-    let headset_info = HeadsetInfoPacket {
-        recommended_eye_width: recommended_eye_width as _,
-        recommended_eye_height: recommended_eye_height as _,
-        available_refresh_rates,
-        preferred_refresh_rate,
-        microphone_sample_rate,
-        reserved: format!("{}", *ALVR_VERSION),
-    };
-
-    let runtime = Runtime::new().unwrap();
-
-    runtime.spawn(async move {
-        let connection_loop = connection::connection_lifecycle_loop(headset_info);
-
-        tokio::select! {
-            _ = connection_loop => (),
-            _ = ON_DESTROY_NOTIFIER.notified() => ()
-        };
-    });
-
-    *RUNTIME.lock() = Some(runtime);
+    *CONNECTION_THREAD.lock() = Some(thread::spawn(move || {
+        connection::connection_lifecycle_loop(default_view_resolution, supported_refresh_rates)
+    }));
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn alvr_destroy() {
-    ON_DESTROY_NOTIFIER.notify_waiters();
-
     // shutdown and wait for tasks to finish
-    drop(RUNTIME.lock().take());
+    CONNECTION_THREAD.lock().take().map(|t| t.join().ok());
 
     destroyNative();
 }
@@ -315,7 +303,7 @@ pub unsafe extern "C" fn alvr_destroy() {
 pub unsafe extern "C" fn alvr_resume(swapchain_textures: *mut *const i32, swapchain_length: i32) {
     let config = platform::load_config();
 
-    let resolution = *PREFERRED_RESOLUTION.lock();
+    let resolution = *DEFAULT_VIEW_RESOLUTION.lock();
 
     prepareLoadingRoom(
         resolution.x as _,
@@ -373,49 +361,40 @@ pub unsafe extern "C" fn alvr_start_stream(
 #[no_mangle]
 pub extern "C" fn alvr_send_views_config(fov: *const EyeFov, ipd_m: f32) {
     let fov = unsafe { slice::from_raw_parts(fov, 2) };
-    if let Some(sender) = &*CONTROL_CHANNEL_SENDER.lock() {
-        sender
-            .send(ClientControlPacket::ViewsConfig(ViewsConfig {
-                fov: [
-                    Fov {
-                        left: fov[0].left,
-                        right: fov[0].right,
-                        top: fov[0].top,
-                        bottom: fov[0].bottom,
-                    },
-                    Fov {
-                        left: fov[1].left,
-                        right: fov[1].right,
-                        top: fov[1].top,
-                        bottom: fov[1].bottom,
-                    },
-                ],
-                ipd_m,
-            }))
-            .ok();
-    }
+
+    request(RequestPacket::ViewsConfig(ViewsConfig {
+        fov: [
+            Fov {
+                left: fov[0].left,
+                right: fov[0].right,
+                top: fov[0].top,
+                bottom: fov[0].bottom,
+            },
+            Fov {
+                left: fov[1].left,
+                right: fov[1].right,
+                top: fov[1].top,
+                bottom: fov[1].bottom,
+            },
+        ],
+        ipd_m,
+    }))
+    .ok();
 }
 
 #[no_mangle]
 pub extern "C" fn alvr_send_battery(device_id: u64, gauge_value: f32, is_plugged: bool) {
-    if let Some(sender) = &*CONTROL_CHANNEL_SENDER.lock() {
-        sender
-            .send(ClientControlPacket::Battery(BatteryPacket {
-                device_id,
-                gauge_value,
-                is_plugged,
-            }))
-            .ok();
-    }
+    request(RequestPacket::Battery(BatteryPacket {
+        device_id,
+        gauge_value,
+        is_plugged,
+    }))
+    .ok();
 }
 
 #[no_mangle]
 pub extern "C" fn alvr_send_playspace(width: f32, height: f32) {
-    if let Some(sender) = &*CONTROL_CHANNEL_SENDER.lock() {
-        sender
-            .send(ClientControlPacket::PlayspaceSync(Vec2::new(width, height)))
-            .ok();
-    }
+    request(RequestPacket::PlayspaceSync(Vec2::new(width, height))).ok();
 }
 
 /// Returns frame timestamp in nanoseconds
@@ -488,17 +467,14 @@ pub unsafe extern "C" fn alvr_is_streaming() -> bool {
 
 #[no_mangle]
 pub extern "C" fn alvr_send_button(path_id: u64, value: AlvrButtonValue) {
-    if let Some(sender) = &*CONTROL_CHANNEL_SENDER.lock() {
-        sender
-            .send(ClientControlPacket::Button {
-                path_id,
-                value: match value {
-                    AlvrButtonValue::Binary(value) => ButtonValue::Binary(value),
-                    AlvrButtonValue::Scalar(value) => ButtonValue::Scalar(value),
-                },
-            })
-            .ok();
-    }
+    request(RequestPacket::Button {
+        path_id,
+        value: match value {
+            AlvrButtonValue::Binary(value) => ButtonValue::Binary(value),
+            AlvrButtonValue::Scalar(value) => ButtonValue::Scalar(value),
+        },
+    })
+    .ok();
 }
 
 #[no_mangle]
@@ -599,9 +575,7 @@ pub extern "C" fn alvr_set_waiting_next_idr(waiting: bool) {
 /// decoder helper
 #[no_mangle]
 pub extern "C" fn alvr_request_idr() {
-    if let Some(sender) = &*CONTROL_CHANNEL_SENDER.lock() {
-        sender.send(ClientControlPacket::RequestIdr).ok();
-    }
+    request(RequestPacket::RequestIdr).ok();
 }
 
 /// decoder helper

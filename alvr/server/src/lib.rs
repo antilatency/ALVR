@@ -1,8 +1,8 @@
 mod buttons;
 mod connection;
-mod connection_utils;
 mod dashboard;
 mod logging_backend;
+mod sockets;
 mod statistics;
 mod tracking;
 mod web_server;
@@ -22,7 +22,7 @@ use alvr_common::{
     log,
     once_cell::sync::{Lazy, OnceCell},
     parking_lot::Mutex,
-    ALVR_VERSION,
+    RelaxedAtomic, ALVR_VERSION,
 };
 use alvr_events::EventType;
 use alvr_filesystem::{self as afs, Layout};
@@ -75,6 +75,8 @@ static COMPRESS_AXIS_ALIGNED_CSO: Lazy<Vec<u8>> = Lazy::new(|| {
 });
 static COLOR_CORRECTION_CSO: Lazy<Vec<u8>> =
     Lazy::new(|| include_bytes!("../cpp/platform/win32/ColorCorrectionPixelShader.cso").to_vec());
+
+static IS_ALIVE: Lazy<Arc<RelaxedAtomic>> = Lazy::new(|| Arc::new(RelaxedAtomic::new(false)));
 
 pub fn to_cpp_openvr_prop(key: OpenvrPropertyKey, value: OpenvrPropValue) -> OpenvrProperty {
     let type_ = match value {

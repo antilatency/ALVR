@@ -11,13 +11,11 @@ alvr_common = { path = "../common" }
 alvr_events = { path = "../events" }
 alvr_session = { path = "../session" }
 
-# Serialization
 bincode = "1"
-serde = { version = "1", features = ["derive"] }
-# Async and networking
 bytes = "1"
 futures = "0.3"
 governor = "0.3"
 nonzero_ext = "0.3"
+serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["rt", "net", "macros"] }
 tokio-util = { version = "0.7", features = ["codec", "net"] }

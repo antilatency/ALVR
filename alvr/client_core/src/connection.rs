@@ -1,37 +1,41 @@
 #![allow(clippy::if_same_then_else)]
 
 use crate::{
-    connection_utils::{self, ConnectionError},
-    platform,
+    platform, request,
+    sockets::{self, AnnouncerSocket, ControlListenerSocket, RequestSocket, ScanResult, SseSocket},
     statistics::StatisticsManager,
-    AlvrEvent, VideoFrame, CONTROL_CHANNEL_SENDER, DECODER_REF, EVENT_BUFFER, IDR_PARSED,
-    IS_RESUMED, STATISTICS_MANAGER, STATISTICS_SENDER, TRACKING_SENDER,
+    AlvrEvent, VideoFrame, DECODER_REF, EVENT_BUFFER, IDR_PARSED, IS_ALIVE, IS_RESUMED,
+    REQUEST_SOCKET, SHOULD_STREAM, STATISTICS_MANAGER, STATISTICS_SENDER, TRACKING_SENDER,
 };
 use alvr_audio::{AudioDevice, AudioDeviceType};
-use alvr_common::{prelude::*, ALVR_NAME, ALVR_VERSION};
+use alvr_common::{glam::UVec2, once_cell::sync::Lazy, prelude::*, ALVR_NAME, ALVR_VERSION};
 use alvr_session::{AudioDeviceId, CodecType, OculusFovetionLevel, SessionDesc};
 use alvr_sockets::{
-    spawn_cancelable, ClientConfigPacket, ClientControlPacket, ClientHandshakePacket, Haptics,
-    HeadsetInfoPacket, PeerType, ProtoControlSocket, ServerControlPacket, ServerHandshakePacket,
-    StreamSocketBuilder, VideoFrameHeaderPacket, AUDIO, HAPTICS, STATISTICS, TRACKING, VIDEO,
+    spawn_cancelable, Haptics, RequestPacket, ResponsePacket, SsePacket, StreamConfigPacket,
+    StreamSocketBuilder, VideoFrameHeaderPacket, VideoStreamingCapabilities, AUDIO_STREAM,
+    HAPTICS_STREAM, STATISTICS_STREAM, TRACKING_STREAM, VIDEO_STREAM,
 };
 use futures::future::BoxFuture;
 use glyph_brush_layout::{
     ab_glyph::{Font, FontRef, ScaleFont},
     FontId, GlyphPositioner, HorizontalAlign, Layout, SectionGeometry, SectionText, VerticalAlign,
 };
+use rand::distributions;
 use serde_json as json;
 use settings_schema::Switch;
 use std::{
     future, mem,
+    net::IpAddr,
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc as smpsc, Arc,
     },
+    thread,
     time::Duration,
 };
 use tokio::{
-    sync::{mpsc as tmpsc, Mutex},
+    runtime::Runtime,
+    sync::{mpsc as tmpsc, Mutex, Notify},
     task,
     time::{self, Instant},
 };
@@ -54,27 +58,16 @@ const STREAM_STARTING_MESSAGE: &str = "The stream will begin soon\nPlease wait..
 const SERVER_RESTART_MESSAGE: &str = "The server is restarting\nPlease wait...";
 const SERVER_DISCONNECTED_MESSAGE: &str = "The server has disconnected.";
 
-const CONTROL_CONNECT_RETRY_PAUSE: Duration = Duration::from_millis(500);
+const DISCOVERY_RETRY_PAUSE: Duration = Duration::from_millis(500);
 const RETRY_CONNECT_MIN_INTERVAL: Duration = Duration::from_secs(1);
 const NETWORK_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(1);
-const CLEANUP_PAUSE: Duration = Duration::from_millis(500);
+const CONNECTION_ERROR_PAUSE: Duration = Duration::from_millis(500);
 
 const LOADING_TEXTURE_WIDTH: usize = 1280;
 const LOADING_TEXTURE_HEIGHT: usize = 720;
 const FONT_SIZE: f32 = 50_f32;
 
-// close stream on Drop (manual disconnection or execution canceling)
-struct StreamCloseGuard {
-    is_connected: Arc<AtomicBool>,
-}
-
-impl Drop for StreamCloseGuard {
-    fn drop(&mut self) {
-        self.is_connected.store(false, Ordering::Relaxed);
-    }
-}
-
-fn set_loading_message(message: &str) {
+fn set_lobby_message(message: &str) {
     let hostname = platform::load_config().hostname;
 
     let message = format!(
@@ -122,6 +115,121 @@ fn set_loading_message(message: &str) {
     unsafe { crate::updateLoadingTexuture(buffer.as_ptr()) };
 }
 
+pub fn connection_lifecycle_loop(
+    default_view_resolution: UVec2,
+    supported_refresh_rates: Vec<f32>,
+) {
+    set_lobby_message(INITIAL_MESSAGE);
+
+    loop {
+        match connection_pipeline(default_view_resolution, supported_refresh_rates.clone()) {
+            Ok(()) => continue,
+            Err(InterruptibleError::Interrupted) => return,
+            Err(InterruptibleError::Other(e)) => {
+                let message = format!("Connection error:\n{e}\nCheck the PC for more details");
+                error!("{message}");
+                set_lobby_message(&message);
+
+                // avoid spamming error messages
+                thread::sleep(CONNECTION_ERROR_PAUSE);
+            }
+        }
+    }
+}
+
+fn connection_pipeline(
+    default_view_resolution: UVec2,
+    supported_refresh_rates: Vec<f32>,
+) -> IntResult {
+    let (server_ip, request_socket, mut sse_socket) = {
+        let config = platform::load_config();
+        let announcer_socket = AnnouncerSocket::new(&config.hostname).map_err(to_int_e!())?;
+        let listener_socket =
+            ControlListenerSocket::new(Arc::clone(&IS_ALIVE)).map_err(to_int_e!())?;
+
+        loop {
+            check_interrupt!(IS_ALIVE.value());
+
+            if let Err(e) = announcer_socket.broadcast() {
+                warn!("Broadcast error: {e}");
+                set_lobby_message(NETWORK_UNREACHABLE_MESSAGE);
+
+                thread::sleep(RETRY_CONNECT_MIN_INTERVAL);
+
+                set_lobby_message(INITIAL_MESSAGE);
+
+                return Ok(());
+            }
+
+            match listener_socket.scan() {
+                Ok(ScanResult::Connected {
+                    server_ip,
+                    request_socket,
+                    sse_socket,
+                }) => break (server_ip, request_socket, sse_socket),
+                Ok(ScanResult::UnrelatedPeer) => info!("Found unrelated peer"),
+                Ok(ScanResult::MismatchedVersion) => {
+                    warn!("Found server with wrong version");
+                    set_lobby_message(INCOMPATIBLE_VERSIONS_MESSAGE);
+                }
+                Err(InterruptibleError::Interrupted) => (), // Interrupts here are recoverable
+                e => (),
+            };
+
+            thread::sleep(DISCOVERY_RETRY_PAUSE);
+        }
+    };
+    *REQUEST_SOCKET.lock() = Some(request_socket);
+
+    let microphone_sample_rate =
+        AudioDevice::new(None, AudioDeviceId::Default, AudioDeviceType::Input)
+            .unwrap()
+            .input_sample_rate()
+            .unwrap();
+    // Advertise this client as streaming-capable
+    request(RequestPacket::ClientCapabilities(Some(
+        VideoStreamingCapabilities {
+            default_view_resolution,
+            supported_refresh_rates,
+            microphone_sample_rate,
+        },
+    )))
+    .map_err(int_e!())?;
+
+    // the stream socket is still async and requires tokio
+    let mut runtime = None;
+
+    loop {
+        match sse_socket.poll()? {
+            SsePacket::StartStreaming(config_packet) => {
+                runtime = None;
+
+                SHOULD_STREAM.set(true);
+
+                let new_runtime = Runtime::new().unwrap();
+
+                new_runtime
+                    .spawn(async move { streaming_pipeline(server_ip, config_packet).await });
+
+                runtime = Some(new_runtime);
+            }
+            SsePacket::StopStreaming => {
+                SHOULD_STREAM.set(false);
+                drop(runtime.take());
+            }
+            SsePacket::Event(_) => (), // todo
+            SsePacket::ServerRestarting => {
+                info!("Server restarting");
+                set_lobby_message(SERVER_RESTART_MESSAGE);
+
+                break Ok(());
+            }
+            _ => (),
+        }
+        // let fjdks = sse_socket.
+    }
+}
+
 fn on_server_connected(
     eye_width: i32,
     eye_height: i32,
@@ -155,104 +263,26 @@ fn on_server_connected(
     .unwrap();
 }
 
-async fn connection_pipeline(headset_info: &HeadsetInfoPacket) -> StrResult {
-    let device_name = platform::device_name();
-    let hostname = platform::load_config().hostname;
-
-    let handshake_packet = ClientHandshakePacket {
-        alvr_name: ALVR_NAME.into(),
-        version: ALVR_VERSION.clone(),
-        device_name,
-        hostname,
-        reserved1: "".into(),
-        reserved2: "".into(),
-    };
-
-    let (mut proto_socket, server_ip) = tokio::select! {
-        res = connection_utils::announce_client_loop(handshake_packet) => {
-            match res? {
-                ConnectionError::ServerMessage(message) => {
-                    info!("Server response: {message:?}");
-                    let message_str = match message {
-                        ServerHandshakePacket::ClientUntrusted => CLIENT_UNTRUSTED_MESSAGE,
-                        ServerHandshakePacket::IncompatibleVersions =>
-                            INCOMPATIBLE_VERSIONS_MESSAGE,
-                    };
-                    set_loading_message(message_str);
-                    return Ok(());
-                }
-                ConnectionError::NetworkUnreachable => {
-                    info!("Network unreachable");
-                    set_loading_message(
-                        NETWORK_UNREACHABLE_MESSAGE,
-                    );
-
-                    time::sleep(RETRY_CONNECT_MIN_INTERVAL).await;
-
-                    set_loading_message(
-                        INITIAL_MESSAGE,
-                    );
-
-                    return Ok(());
-                }
-            }
-        },
-        pair = async {
-            loop {
-                if let Ok(pair) = ProtoControlSocket::connect_to(PeerType::Server).await {
-                    break pair;
-                }
-
-                time::sleep(CONTROL_CONNECT_RETRY_PAUSE).await;
-            }
-        } => pair
-    };
-
-    if !IS_RESUMED.value() {
-        info!("Not streaming because not resumed");
-        return Ok(());
-    }
-
-    proto_socket
-        .send(&(headset_info, server_ip))
-        .await
-        .map_err(err!())?;
-    let config_packet = proto_socket
-        .recv::<ClientConfigPacket>()
-        .await
-        .map_err(err!())?;
-
-    let (control_sender, mut control_receiver) = proto_socket.split();
-    let control_sender = Arc::new(Mutex::new(control_sender));
-
-    match control_receiver.recv().await {
-        Ok(ServerControlPacket::StartStream) => {
-            info!("Stream starting");
-            set_loading_message(STREAM_STARTING_MESSAGE);
-        }
-        Ok(ServerControlPacket::Restarting) => {
-            info!("Server restarting");
-            set_loading_message(SERVER_RESTART_MESSAGE);
-            return Ok(());
-        }
-        Err(e) => {
-            info!("Server disconnected. Cause: {e}");
-            set_loading_message(SERVER_DISCONNECTED_MESSAGE);
-            return Ok(());
-        }
-        _ => {
-            info!("Unexpected packet");
-            set_loading_message("Unexpected packet");
-            return Ok(());
-        }
-    }
-
+async fn streaming_pipeline(server_ip: IpAddr, config_packet: StreamConfigPacket) -> IntResult {
     let settings = {
+        let session_json = match request(RequestPacket::Session).map_err(int_e!())? {
+            ResponsePacket::Session(session) => session,
+            other => return int_fmt_e!("Unexpected response: {other:?}"),
+        };
+
         let mut session_desc = SessionDesc::default();
         session_desc
-            .merge_from_json(&json::from_str(&config_packet.session_desc).map_err(err!())?)?;
+            .merge_from_json(&json::from_str(&session_json).map_err(to_int_e!())?)
+            .map_err(to_int_e!())?;
         session_desc.to_settings()
     };
+
+    // todo: make event-based
+    {
+        let mut config = platform::load_config();
+        config.dark_mode = settings.extra.client_dark_mode;
+        platform::store_config(&config);
+    }
 
     *STATISTICS_MANAGER.lock() = Some(StatisticsManager::new(
         settings.connection.statistics_history_size as _,
@@ -262,51 +292,26 @@ async fn connection_pipeline(headset_info: &HeadsetInfoPacket) -> StrResult {
         settings.connection.stream_port,
         settings.connection.stream_protocol,
     )
-    .await?;
+    .await
+    .map_err(to_int_e!())?;
 
-    if let Err(e) = control_sender
-        .lock()
-        .await
-        .send(&ClientControlPacket::StreamReady)
-        .await
-    {
-        info!("Server disconnected. Cause: {e}");
-        set_loading_message(SERVER_DISCONNECTED_MESSAGE);
-        return Ok(());
-    }
+    request(RequestPacket::StreamSocketReady).map_err(int_e!())?;
 
     let stream_socket = tokio::select! {
         res = stream_socket_builder.accept_from_server(
             server_ip,
             settings.connection.stream_port,
-        ) => res?,
+        ) => res.map_err(to_int_e!())?,
         _ = time::sleep(Duration::from_secs(5)) => {
-            return fmt_e!("Timeout while setting up streams");
+            return int_fmt_e!("Timeout while setting up streams");
         }
     };
     let stream_socket = Arc::new(stream_socket);
 
-    info!("Connected to server");
-
-    let is_connected = Arc::new(AtomicBool::new(true));
-    let _stream_guard = StreamCloseGuard {
-        is_connected: Arc::clone(&is_connected),
-    };
-
-    {
-        let mut config = platform::load_config();
-        config.dark_mode = settings.extra.client_dark_mode;
-        platform::store_config(&config);
-    }
-
-    // create this before initializing the stream on cpp side
-    let (control_channel_sender, mut control_channel_receiver) = tmpsc::unbounded_channel();
-    *CONTROL_CHANNEL_SENDER.lock() = Some(control_channel_sender);
-
     unsafe {
         crate::setStreamConfig(crate::StreamConfigInput {
-            eyeWidth: config_packet.eye_resolution_width,
-            eyeHeight: config_packet.eye_resolution_height,
+            eyeWidth: config_packet.view_resolution.x,
+            eyeHeight: config_packet.view_resolution.y,
             enableFoveation: matches!(settings.video.foveated_rendering, Switch::Enabled(_)),
             foveationCenterSizeX: if let Switch::Enabled(foveation_vars) =
                 &settings.video.foveated_rendering
@@ -354,8 +359,8 @@ async fn connection_pipeline(headset_info: &HeadsetInfoPacket) -> StrResult {
     }
 
     on_server_connected(
-        config_packet.eye_resolution_width as _,
-        config_packet.eye_resolution_height as _,
+        config_packet.view_resolution.x as _,
+        config_packet.view_resolution.y as _,
         config_packet.fps,
         settings.video.codec,
         settings.video.client_request_realtime_decoder,
@@ -378,27 +383,11 @@ async fn connection_pipeline(headset_info: &HeadsetInfoPacket) -> StrResult {
             .unwrap_or_default(),
     );
 
-    // setup stream loops
-
-    // let (debug_sender, mut debug_receiver) = tmpsc::unbounded_channel();
-    // let debug_loop = {
-    //     let control_sender = Arc::clone(&control_sender);
-    //     async move {
-    //         while let Some(data) = debug_receiver.recv().await {
-    //             control_sender
-    //                 .lock()
-    //                 .await
-    //                 .send(&ClientControlPacket::Reserved(data))
-    //                 .await
-    //                 .ok();
-    //         }
-
-    //         Ok(())
-    //     }
-    // };
-
     let tracking_send_loop = {
-        let mut socket_sender = stream_socket.request_stream(TRACKING).await?;
+        let mut socket_sender = stream_socket
+            .request_stream(TRACKING_STREAM)
+            .await
+            .map_err(to_int_e!())?;
         async move {
             let (data_sender, mut data_receiver) = tmpsc::unbounded_channel();
             *TRACKING_SENDER.lock() = Some(data_sender);
@@ -423,7 +412,10 @@ async fn connection_pipeline(headset_info: &HeadsetInfoPacket) -> StrResult {
     };
 
     let statistics_send_loop = {
-        let mut socket_sender = stream_socket.request_stream(STATISTICS).await?;
+        let mut socket_sender = stream_socket
+            .request_stream(STATISTICS_STREAM)
+            .await
+            .map_err(to_int_e!())?;
         async move {
             let (data_sender, mut data_receiver) = tmpsc::unbounded_channel();
             *STATISTICS_SENDER.lock() = Some(data_sender);
@@ -443,8 +435,9 @@ async fn connection_pipeline(headset_info: &HeadsetInfoPacket) -> StrResult {
 
     let video_receive_loop = {
         let mut receiver = stream_socket
-            .subscribe_to_stream::<VideoFrameHeaderPacket>(VIDEO)
-            .await?;
+            .subscribe_to_stream::<VideoFrameHeaderPacket>(VIDEO_STREAM)
+            .await
+            .map_err(to_int_e!())?;
         let legacy_receive_data_sender = legacy_receive_data_sender.clone();
         async move {
             loop {
@@ -479,8 +472,9 @@ async fn connection_pipeline(headset_info: &HeadsetInfoPacket) -> StrResult {
 
     let haptics_receive_loop = {
         let mut receiver = stream_socket
-            .subscribe_to_stream::<Haptics>(HAPTICS)
-            .await?;
+            .subscribe_to_stream::<Haptics>(HAPTICS_STREAM)
+            .await
+            .map_err(to_int_e!())?;
         async move {
             loop {
                 let packet = receiver.recv().await?.header;
@@ -513,7 +507,7 @@ async fn connection_pipeline(headset_info: &HeadsetInfoPacket) -> StrResult {
                 let mut idr_request_deadline = None;
 
                 while let Ok(mut data) = legacy_receive_data_receiver.recv() {
-                    if !IS_RESUMED.value() {
+                    if !SHOULD_STREAM.value() {
                         break;
                     }
 
@@ -522,9 +516,7 @@ async fn connection_pipeline(headset_info: &HeadsetInfoPacket) -> StrResult {
                     if !IDR_PARSED.load(Ordering::Relaxed) {
                         if let Some(deadline) = idr_request_deadline {
                             if deadline < Instant::now() {
-                                if let Some(sender) = &*CONTROL_CHANNEL_SENDER.lock() {
-                                    sender.send(ClientControlPacket::RequestIdr).ok();
-                                }
+                                request(RequestPacket::RequestIdr).ok();
                                 idr_request_deadline = None;
                             }
                         } else {
@@ -556,9 +548,12 @@ async fn connection_pipeline(headset_info: &HeadsetInfoPacket) -> StrResult {
 
     let game_audio_loop: BoxFuture<_> = if let Switch::Enabled(desc) = settings.audio.game_audio {
         let device = AudioDevice::new(None, AudioDeviceId::Default, AudioDeviceType::Output)
-            .map_err(err!())?;
+            .map_err(to_int_e!())?;
 
-        let game_audio_receiver = stream_socket.subscribe_to_stream(AUDIO).await?;
+        let game_audio_receiver = stream_socket
+            .subscribe_to_stream(AUDIO_STREAM)
+            .await
+            .map_err(to_int_e!())?;
         Box::pin(audio::play_audio_loop(
             device,
             2,
@@ -572,9 +567,12 @@ async fn connection_pipeline(headset_info: &HeadsetInfoPacket) -> StrResult {
 
     let microphone_loop: BoxFuture<_> = if matches!(settings.audio.microphone, Switch::Enabled(_)) {
         let device = AudioDevice::new(None, AudioDeviceId::Default, AudioDeviceType::Input)
-            .map_err(err!())?;
+            .map_err(to_int_e!())?;
 
-        let microphone_sender = stream_socket.request_stream(AUDIO).await?;
+        let microphone_sender = stream_socket
+            .request_stream(AUDIO_STREAM)
+            .await
+            .map_err(to_int_e!())?;
         Box::pin(audio::record_audio_loop(
             device,
             1,
@@ -585,49 +583,16 @@ async fn connection_pipeline(headset_info: &HeadsetInfoPacket) -> StrResult {
         Box::pin(future::pending())
     };
 
-    let keepalive_sender_loop = {
-        let control_sender = Arc::clone(&control_sender);
-        async move {
-            loop {
-                let res = control_sender
-                    .lock()
-                    .await
-                    .send(&ClientControlPacket::KeepAlive)
-                    .await;
-                if let Err(e) = res {
-                    info!("Server disconnected. Cause: {e}");
-                    set_loading_message(SERVER_DISCONNECTED_MESSAGE);
-                    break Ok(());
-                }
-
-                time::sleep(NETWORK_KEEPALIVE_INTERVAL).await;
-            }
-        }
-    };
-
-    let control_send_loop = async move {
-        while let Some(packet) = control_channel_receiver.recv().await {
-            control_sender.lock().await.send(&packet).await.ok();
-        }
-
-        Ok(())
-    };
-
-    let control_receive_loop = async move {
+    let keepalive_sender_loop = async move {
         loop {
-            match control_receiver.recv().await {
-                Ok(ServerControlPacket::Restarting) => {
-                    info!("{SERVER_RESTART_MESSAGE}");
-                    set_loading_message(SERVER_RESTART_MESSAGE);
-                    break Ok(());
-                }
-                Ok(_) => (),
-                Err(e) => {
-                    info!("{SERVER_DISCONNECTED_MESSAGE} Cause: {e}");
-                    set_loading_message(SERVER_DISCONNECTED_MESSAGE);
-                    break Ok(());
-                }
+            let res = request(RequestPacket::KeepAlive);
+            if let Err(e) = res {
+                info!("Server disconnected. Cause: {e}");
+                set_lobby_message(SERVER_DISCONNECTED_MESSAGE);
+                break Ok(());
             }
+
+            time::sleep(NETWORK_KEEPALIVE_INTERVAL).await;
         }
     };
 
@@ -639,9 +604,7 @@ async fn connection_pipeline(headset_info: &HeadsetInfoPacket) -> StrResult {
             if let Err(e) = res {
                 info!("Server disconnected. Cause: {e}");
             }
-            set_loading_message(
-                SERVER_DISCONNECTED_MESSAGE
-            );
+            set_lobby_message(SERVER_DISCONNECTED_MESSAGE);
 
             Ok(())
         },
@@ -651,34 +614,10 @@ async fn connection_pipeline(headset_info: &HeadsetInfoPacket) -> StrResult {
         res = spawn_cancelable(statistics_send_loop) => res,
         res = spawn_cancelable(video_receive_loop) => res,
         res = spawn_cancelable(haptics_receive_loop) => res,
-        res = spawn_cancelable(control_send_loop) => res,
-        res = legacy_stream_socket_loop => res.map_err(err!())?,
+        res = legacy_stream_socket_loop => res.map_err(to_int_e!())?,
 
         // keep these loops on the current task
         res = keepalive_sender_loop => res,
-        res = control_receive_loop => res,
-        // res = debug_loop => res,
     }
-}
-
-pub async fn connection_lifecycle_loop(headset_info: HeadsetInfoPacket) {
-    set_loading_message(INITIAL_MESSAGE);
-
-    loop {
-        tokio::join!(
-            async {
-                let maybe_error = connection_pipeline(&headset_info).await;
-
-                if let Err(e) = maybe_error {
-                    let message = format!("Connection error:\n{e}\nCheck the PC for more details");
-                    error!("{message}");
-                    set_loading_message(&message);
-                }
-
-                // let any running task or socket shutdown
-                time::sleep(CLEANUP_PAUSE).await;
-            },
-            time::sleep(RETRY_CONNECT_MIN_INTERVAL),
-        );
-    }
+    .map_err(to_int_e!())
 }

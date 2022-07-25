@@ -1,16 +1,16 @@
-mod control_socket;
+mod ldc_tcp_socket;
 mod packets;
 mod stream_socket;
 
 use std::net::{IpAddr, Ipv4Addr};
 
-pub use control_socket::*;
+pub use ldc_tcp_socket::*;
 pub use packets::*;
 pub use stream_socket::*;
 
 pub const LOCAL_IP: IpAddr = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
 pub const CONTROL_PORT: u16 = 9943;
-pub const MAX_HANDSHAKE_PACKET_SIZE_BYTES: usize = 4_000;
+pub const HANDSHAKE_PACKET_SIZE_BYTES: usize = 56; // this may change in future protocols
 
 type Ldc = tokio_util::codec::LengthDelimitedCodec;
 
