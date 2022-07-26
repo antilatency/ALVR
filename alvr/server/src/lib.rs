@@ -251,16 +251,15 @@ fn init() {
         thread::spawn(|| alvr_common::show_err(dashboard::ui_thread()));
     }
 
-    {
-        let mut data_manager = SERVER_DATA_MANAGER.lock();
-        if matches!(data_manager.get_gpu_vendor(), GpuVendor::Nvidia) {
-            data_manager
-                .session_mut()
-                .session_settings
-                .extra
-                .patches
-                .linux_async_reprojection = false;
-        }
+    if matches!(graphics_info::get_gpu_vendor(), GpuVendor::Nvidia) {
+        SESSION_MANAGER
+            .lock()
+            .get_mut()
+            .session_settings
+            .extra
+            .patches
+            .linux_async_reprojection = false;
+    }
 
         if data_manager.session().server_version != *ALVR_VERSION {
             let mut session_ref = data_manager.session_mut();

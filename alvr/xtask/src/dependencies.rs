@@ -1,6 +1,6 @@
 use crate::command;
 use alvr_filesystem as afs;
-use std::{error::Error, fs};
+use std::{fs, io::BufRead, path::Path};
 
 pub fn choco_install(package: &str) -> Result<(), Box<dyn Error>> {
     command::run_without_shell(
@@ -98,7 +98,10 @@ pub fn build_ffmpeg_linux(nvenc_flag: bool) {
     command::run_as_bash_in(
         &final_path,
         &format!(
-            "./configure {} {} {} {} {} {} {} {} {} {} {} {} {} {} {}",
+            // The reason for 4x$ in LDSOFLAGS var refer to https://stackoverflow.com/a/71429999
+            // all varients of --extra-ldsoflags='-Wl,-rpath,$ORIGIN' do not work! don't waste your time trying!
+            //
+            r#"LDSOFLAGS=-Wl,-rpath,\''$$$$ORIGIN'\' ./configure {} {} {} {} {} {} {} {} {} {} {} {} {} {} {}"#,
             "--enable-gpl --enable-version3",
             "--disable-static --enable-shared",
             "--disable-programs",
@@ -148,7 +151,7 @@ pub fn build_ffmpeg_linux(nvenc_flag: bool) {
             "--enable-hwaccel=h264_vaapi --enable-hwaccel=hevc_vaapi",
             "--enable-filter=scale --enable-filter=scale_vaapi",
             "--enable-libx264 --enable-libx265 --enable-vulkan",
-            "--enable-libdrm",
+            "--enable-libdrm --enable-pic --enable-rpath"
         ),
     )
     .unwrap();
@@ -185,4 +188,30 @@ pub fn build_android_deps(skip_admin_priv: bool) {
     command::run("cargo install cargo-apk").unwrap();
 
     get_oculus_openxr_mobile_loader();
+}
+
+pub fn find_resolved_so_paths(
+    bin_or_so: &std::path::Path,
+    depends_so: &str,
+) -> Vec<std::path::PathBuf> {
+    let cmdline = format!(
+        "ldd {} | cut -d '>' -f 2 | awk \'{{print $1}}\' | grep {}",
+        bin_or_so.display(),
+        depends_so
+    );
+    std::process::Command::new("sh")
+        .args(&["-c", &cmdline])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .map_or(vec![], |mut child| {
+            let mut result = std::io::BufReader::new(child.stdout.take().unwrap())
+                .lines()
+                .filter(|line| line.is_ok())
+                .map(|line| std::path::PathBuf::from(line.unwrap()).canonicalize()) // canonicalize resolves symlinks
+                .filter(|result| result.is_ok())
+                .map(|pp| pp.unwrap())
+                .collect::<Vec<_>>();
+            result.dedup();
+            result
+        })
 }
