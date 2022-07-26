@@ -1,0 +1,3 @@
+[submodule "alvr/client/android/app/src/main/antilatency-integration/AntilatencySDK"]
+	path = alvr/client/android/app/src/main/antilatency-integration/AntilatencySDK
+	url = https://github.com/AntilatencySDK/Release_3.5.2.git
