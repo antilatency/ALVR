@@ -29,6 +29,8 @@
 #include <glm/gtx/euler_angles.hpp>
 #include <mutex>
 
+#include "../antilatency-integration/src/antilatency.h"
+
 using namespace std;
 using namespace gl_render_utils;
 
@@ -71,6 +73,8 @@ public:
 
     std::map<uint64_t, ovrTracking2> trackingFrameMap;
     std::mutex trackingFrameMutex;
+
+	std::shared_ptr<AntilatencyManager> altManager;
 
     bool darkMode;
     ovrRenderer Renderer;
@@ -178,6 +182,8 @@ OnCreateResult onCreate(void *v_env, void *v_activity, void *v_assetManager) {
     //ovrRequest req;
     //req = ovr_User_GetLoggedInUser();
     //LOGI("Logged in user is %" PRIu64 "\n", req);
+
+	g_ctx.altManager = std::make_shared<AntilatencyManager>(g_ctx.env, activity);
 
     return {(int) g_ctx.streamTexture.get()->GetGLTexture(), (int) g_ctx.loadingTexture};
 }
@@ -550,15 +556,42 @@ void sendTrackingInfo(bool clientsidePrediction) {
         }
     }
 
+	vrapi_SetTrackingSpace(g_ctx.Ovr, VRAPI_TRACKING_SPACE_STAGE);
+	
     TrackingInfo info = {};
     info.targetTimestampNs = targetTimestampNs;
 
     info.mounted = vrapi_GetSystemStatusInt(&g_ctx.java, VRAPI_SYS_STATUS_MOUNTED);
+		   
+	auto position = frame->tracking.HeadPose.Pose.Position;
+    auto rotation = frame->tracking.HeadPose.Pose.Orientation;
+    auto extrapolationTime = frame->tracking.HeadPose.PredictionInSeconds;
 
-    memcpy(&info.HeadPose_Pose_Orientation, &tracking.HeadPose.Pose.Orientation,
-           sizeof(ovrQuatf));
-    memcpy(&info.HeadPose_Pose_Position, &tracking.HeadPose.Pose.Position,
-           sizeof(ovrVector3f));
+    g_ctx.altManager->setRigPose(position, rotation, extrapolationTime);
+    auto altRotation = g_ctx.altManager->getTrackingData().head.pose.rotation;
+    auto altPosition = g_ctx.altManager->getTrackingData().head.pose.position;
+
+    altPosition.z *= -1.0f;
+
+    // matching axis orientation
+    altRotation.w *= -1.0f;
+    altRotation.z *= -1.0f;
+
+    memcpy(&info.HeadPose_Pose_Orientation, &altRotation, sizeof(ovrQuatf));
+    memcpy(&info.HeadPose_Pose_Position, &altPosition, sizeof(ovrVector3f));
+
+    LOGI("ALT Position=(%f, %f, %f)",
+         g_ctx.altManager->getTrackingData().head.pose.position.x,
+         g_ctx.altManager->getTrackingData().head.pose.position.y,
+         g_ctx.altManager->getTrackingData().head.pose.position.z
+    );
+
+    LOGI("ALT Orientation=(%f, %f, %f, %f)",
+         altRotation.x,
+         altRotation.y,
+         altRotation.z,
+         altRotation.w
+    );
 
     setControllerInfo(&info, clientsidePrediction ? (double)targetTimestampNs / 1e9 : 0.);
 

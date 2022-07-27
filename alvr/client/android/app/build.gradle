@@ -72,6 +72,18 @@ android {
 
 dependencies {
     implementation fileTree(dir: 'libs', include: ['*.jar', '*.so'])
+	implementation (name:'AntilatencyAltEnvironmentHorizontalGrid', ext:'aar')
+    implementation (name:'AntilatencyAltEnvironmentPillars', ext:'aar')
+    implementation (name:'AntilatencyAltEnvironmentSelector', ext:'aar')
+    implementation (name:'AntilatencyAltTracking', ext:'aar')
+    implementation (name:'AntilatencyBracer', ext:'aar')
+    implementation (name:'AntilatencyDeviceNetwork', ext:'aar')
+    implementation (name:'AntilatencyHardwareExtensionInterface', ext:'aar')
+    implementation (name:'AntilatencyRadioMetrics', ext:'aar')
+    implementation (name:'AntilatencyStorageClient', ext:'aar')
+    implementation (name:'AntilatencyTrackingAlignment', ext:'aar')
+    implementation (name:'AntilatencyUsbServiceInterfaces', ext:'aar')
+	
     implementation 'androidx.appcompat:appcompat:1.4.1'
     implementation 'androidx.constraintlayout:constraintlayout:2.1.3'
 }
