@@ -28,6 +28,9 @@
 #include <inttypes.h>
 #include <glm/gtx/euler_angles.hpp>
 #include <mutex>
+#include "antilatency.h"
+#include <glm/gtx/quaternion.hpp>
+
 
 using namespace std;
 using namespace gl_render_utils;
@@ -77,6 +80,8 @@ public:
 
     uint8_t lastLeftControllerBattery = 0;
     uint8_t lastRightControllerBattery = 0;
+
+    std::shared_ptr<AntilatencyManager> altManager;
 
     float lastIpd;
     EyeFov lastFov;
@@ -178,6 +183,11 @@ OnCreateResult onCreate(void *v_env, void *v_activity, void *v_assetManager) {
     //ovrRequest req;
     //req = ovr_User_GetLoggedInUser();
     //LOGI("Logged in user is %" PRIu64 "\n", req);
+
+    LOGI("Antilatency: creating altManager...");
+    g_ctx.altManager = std::make_shared<AntilatencyManager>(g_ctx.env, activity);
+
+    LOGI("Alt manager was created: %d", 1);
 
     return {(int) g_ctx.streamTexture.get()->GetGLTexture(), (int) g_ctx.loadingTexture};
 }
@@ -292,6 +302,7 @@ void setControllerInfo(TrackingInfo *packet, double displayTime) {
          vrapi_EnumerateInputDevices(g_ctx.Ovr, deviceIndex, &curCaps) >= 0; deviceIndex++) {
         LOG("Device %d: Type=%d ID=%d", deviceIndex, curCaps.Type, curCaps.DeviceID);
         if (curCaps.Type == ovrControllerType_Hand) {  //A3
+            LOGI("Antilatency: type hand");
             ovrInputHandCapabilities handCapabilities;
             ovrInputStateHand inputStateHand;
             handCapabilities.Header = curCaps;
@@ -377,6 +388,7 @@ void setControllerInfo(TrackingInfo *packet, double displayTime) {
             }
         }
         if (curCaps.Type == ovrControllerType_TrackedRemote) {
+
             ovrInputTrackedRemoteCapabilities remoteCapabilities;
             ovrInputStateTrackedRemote remoteInputState;
 
@@ -465,31 +477,42 @@ void setControllerInfo(TrackingInfo *packet, double displayTime) {
                                             displayTime, &tracking) != ovrSuccess) {
                 LOG("vrapi_GetInputTrackingState failed. Device was disconnected?");
             } else {
-
+                LOGI("Antilatency: start orientation correction");
+                Antilatency::Math::floatQ correctedSpace;
+                g_ctx.altManager->controllerRotationCorrection(MathUtils::FloatFromQ(tracking.HeadPose.Pose.Orientation), correctedSpace);
+                LOGI("Antilatency: copying corrected orientation");
                 memcpy(&c.orientation,
-                        &tracking.HeadPose.Pose.Orientation,
-                        sizeof(tracking.HeadPose.Pose.Orientation));
+                        &correctedSpace,
+                        sizeof(correctedSpace));
 
                 if ((tracking.Status & VRAPI_TRACKING_STATUS_POSITION_TRACKED) ||
                         (remoteCapabilities.ControllerCapabilities & ovrControllerCaps_ModelOculusGo)) {
+                    LOGI("Antilatency: start poisition correction");
+                    auto correctedPosition = g_ctx.altManager->controllerPositionCorrection(MathUtils::Float3FromPosition(tracking.HeadPose.Pose.Position), controller);
+
+                    LOGI("Antilatency: start copying corrected position");
                     memcpy(&c.position,
-                           &tracking.HeadPose.Pose.Position,
-                           sizeof(tracking.HeadPose.Pose.Position));
+                           &correctedPosition,
+                           sizeof(ovrVector3f));
+
                     memcpy(&g_ctx.lastTrackingPos[controller],
                            &tracking,
                            sizeof(tracking));
                 } else {
+                    auto lastControllerPosition = g_ctx.altManager->getLastControllerPosition(controller);
                     memcpy(&c.position,
-                           &g_ctx.lastTrackingPos[controller].HeadPose.Pose.Position,
+                           &lastControllerPosition,
                            sizeof(g_ctx.lastTrackingPos[controller].HeadPose.Pose.Position));
                 }
 
+                auto correctedAngularVelocity = g_ctx.altManager->controllerVelocityCorrection(MathUtils::Float3FromPosition(tracking.HeadPose.AngularVelocity));
                 memcpy(&c.angularVelocity,
-                       &tracking.HeadPose.AngularVelocity,
+                       &correctedAngularVelocity,
                        sizeof(tracking.HeadPose.AngularVelocity));
 
+                auto linearVelocityCorrection = g_ctx.altManager->controllerVelocityCorrection(MathUtils::Float3FromPosition(tracking.HeadPose.LinearVelocity));
                 memcpy(&c.linearVelocity,
-                       &tracking.HeadPose.LinearVelocity,
+                       &linearVelocityCorrection,
                        sizeof(tracking.HeadPose.LinearVelocity));
             }
         }
@@ -555,10 +578,25 @@ void sendTrackingInfo(bool clientsidePrediction) {
 
     info.mounted = vrapi_GetSystemStatusInt(&g_ctx.java, VRAPI_SYS_STATUS_MOUNTED);
 
-    memcpy(&info.HeadPose_Pose_Orientation, &tracking.HeadPose.Pose.Orientation,
-           sizeof(ovrQuatf));
-    memcpy(&info.HeadPose_Pose_Position, &tracking.HeadPose.Pose.Position,
-           sizeof(ovrVector3f));
+    auto position = tracking.HeadPose.Pose.Position;
+    auto rotation = tracking.HeadPose.Pose.Orientation;
+    auto extrapolationTime = tracking.HeadPose.PredictionInSeconds;
+    g_ctx.altManager->setRigPose(position, rotation, extrapolationTime);
+    auto altPose = g_ctx.altManager->getTrackingData().head.pose;
+
+    altPose.position.z *= -1.0f;
+
+    // matching axis orientation
+    altPose.rotation.w *= -1.0f;
+    altPose.rotation.z *= -1.0f;
+
+    LOGI("Headset A position: (x:%f,y:%f,z:%f)", altPose.position.x, altPose.position.y, altPose.position.z);
+    LOGI("Headset A rotation: (x:%f,y:%f,z:%f,w:%f)", altPose.rotation.x, altPose.rotation.y, altPose.rotation.z, altPose.rotation.w);
+
+    memcpy(&info.HeadPose_Pose_Orientation, &altPose.rotation, sizeof(ovrQuatf));
+    memcpy(&info.HeadPose_Pose_Position, &altPose.position, sizeof(ovrVector3f));
+
+
 
     setControllerInfo(&info, clientsidePrediction ? (double)targetTimestampNs / 1e9 : 0.);
 

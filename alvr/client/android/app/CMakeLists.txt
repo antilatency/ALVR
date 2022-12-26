@@ -42,11 +42,14 @@ add_library( # Sets the name of the library.
              src/main/cpp/gltf_model.cpp
              src/main/cpp/utils.cpp
              src/main/cpp/ovr_context.cpp
+			 src/main/cpp/antilatency.cpp
              ../ALVR-common/reedsolomon/rs.c
              ../ALVR-common/common-utils.cpp
              ../ALVR-common/exception.cpp
              ../ALVR-common/lodepng/lodepng.cpp
+
              )
+
 
 # Searches for a specified prebuilt library and stores the path as a
 # variable. Because CMake includes system libraries in the search path by
@@ -88,5 +91,12 @@ target_link_libraries( # Specifies the target library.
                          libovrplatformloader.so
         )
 
+
 include_directories(include)
-include_directories(../ALVR-common)
+include_directories(
+        ../ALVR-common
+        external/antilatency-integration/AntilatencySDK/Api
+)
+
+
+

@@ -18,6 +18,10 @@ allprojects {
     repositories {
         google()
         jcenter()
+        flatDir {
+            dirs 'libs'
+            dirs 'external/antilatency-integration/AntilatencySDK/Bin/Android/aar'
+        }
     }
 }
 

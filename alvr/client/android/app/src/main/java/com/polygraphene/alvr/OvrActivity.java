@@ -37,6 +37,8 @@ import java.util.concurrent.Semaphore;
 public class OvrActivity extends Activity {
     static {
         System.loadLibrary("alvr_client");
+        System.loadLibrary("AntilatencyDeviceNetwork");
+        System.loadLibrary("AntilatencyStorageClient");
     }
 
     final static String TAG = "OvrActivity";

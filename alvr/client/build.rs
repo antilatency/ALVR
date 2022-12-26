@@ -8,6 +8,9 @@ fn main() {
     let common_cpp_dir = base_cpp_dir.join("ALVR-common");
     let include_cpp_dir = base_cpp_dir.join("app/include");
     let source_cpp_dir = base_cpp_dir.join("app/src/main/cpp");
+	
+	let antilatency_include_cpp_dir = base_cpp_dir.join("app/external/antilatency-integration/AntilatencySDK/Api");
+	
 
     let cpp_paths = walkdir::WalkDir::new(&common_cpp_dir)
         .into_iter()
@@ -31,6 +34,7 @@ fn main() {
             .flag("-frtti")
             .files(source_files_paths)
             .include(&common_cpp_dir)
+			.include(antilatency_include_cpp_dir)
             .include(include_cpp_dir)
             .include(&source_cpp_dir)
             .include(source_cpp_dir.join("gl_render_utils"))
