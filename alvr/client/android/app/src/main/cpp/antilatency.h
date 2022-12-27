@@ -112,12 +112,9 @@ private:
     std::optional<Antilatency::TrackingAlignment::State> externalSpace;
 
     Antilatency::Math::float3 lastHMDOwnPosition;
-    Antilatency::Math::floatQ lastHMDOwnRotation;
 
-    Antilatency::Math::floatQ lastControllerOwnRotation;
 
     Antilatency::Math::float3 lastHMDPosition;
-    Antilatency::Math::floatQ lastHMDRotation;
 
     Antilatency::Math::float3 positionOffset;
     Antilatency::Math::float3 lastControllerPositionASpace[2];
@@ -136,7 +133,6 @@ bool AntilatencyManager::hasAntilatency() {
 
 template<typename T, typename A>
 void AntilatencyManager::setRigPose(T rigPosition, A rigRotation, double extrapolationTime){
-    lastHMDOwnRotation = MathUtils::FloatFromQ(rigRotation);
     lastHMDOwnPosition = MathUtils::Float3FromPosition(rigPosition);
 
     m_rigPose.position = MathUtils::Float3FromPosition(rigPosition);

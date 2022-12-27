@@ -477,20 +477,18 @@ void setControllerInfo(TrackingInfo *packet, double displayTime) {
                                             displayTime, &tracking) != ovrSuccess) {
                 LOG("vrapi_GetInputTrackingState failed. Device was disconnected?");
             } else {
-                LOGI("Antilatency: start orientation correction");
                 Antilatency::Math::floatQ correctedSpace;
                 g_ctx.altManager->controllerRotationCorrection(MathUtils::FloatFromQ(tracking.HeadPose.Pose.Orientation), correctedSpace);
-                LOGI("Antilatency: copying corrected orientation");
+
                 memcpy(&c.orientation,
                         &correctedSpace,
                         sizeof(correctedSpace));
 
                 if ((tracking.Status & VRAPI_TRACKING_STATUS_POSITION_TRACKED) ||
                         (remoteCapabilities.ControllerCapabilities & ovrControllerCaps_ModelOculusGo)) {
-                    LOGI("Antilatency: start poisition correction");
+
                     auto correctedPosition = g_ctx.altManager->controllerPositionCorrection(MathUtils::Float3FromPosition(tracking.HeadPose.Pose.Position), controller);
 
-                    LOGI("Antilatency: start copying corrected position");
                     memcpy(&c.position,
                            &correctedPosition,
                            sizeof(ovrVector3f));
@@ -589,9 +587,6 @@ void sendTrackingInfo(bool clientsidePrediction) {
     // matching axis orientation
     altPose.rotation.w *= -1.0f;
     altPose.rotation.z *= -1.0f;
-
-    LOGI("Headset A position: (x:%f,y:%f,z:%f)", altPose.position.x, altPose.position.y, altPose.position.z);
-    LOGI("Headset A rotation: (x:%f,y:%f,z:%f,w:%f)", altPose.rotation.x, altPose.rotation.y, altPose.rotation.z, altPose.rotation.w);
 
     memcpy(&info.HeadPose_Pose_Orientation, &altPose.rotation, sizeof(ovrQuatf));
     memcpy(&info.HeadPose_Pose_Position, &altPose.position, sizeof(ovrVector3f));

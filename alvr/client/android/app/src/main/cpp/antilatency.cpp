@@ -13,8 +13,6 @@
 #define LOGALTI(...) __android_log_print(ANDROID_LOG_INFO, "Cloud VR Antilatency", __VA_ARGS__)
 #define LOGALTE(...) __android_log_print(ANDROID_LOG_ERROR, "Cloud VR Antilatency", __VA_ARGS__)
 
-// Antilatency数据结构
-
 
 using namespace Antilatency;
 
@@ -28,7 +26,6 @@ void AntilatencyManager::initJni(Antilatency::InterfaceContract::IInterface obj,
 }
 
 AntilatencyManager::AntilatencyManager(JNIEnv* env, jobject activity) {
-
     m_adnLibrary = InterfaceContract::getLibraryInterface<DeviceNetwork::ILibrary>("libAntilatencyDeviceNetwork.so");
     LOGI("Antilatency: adn library was created");
 
@@ -49,12 +46,6 @@ AntilatencyManager::AntilatencyManager(JNIEnv* env, jobject activity) {
 
     LOGI("Antilatency: JavaVM was taken");
 
-//    initJni(m_adnLibrary, jvm, activity);
-//    initJni(m_altTrackingLibrary, jvm, activity);
-//    initJni(m_environmentSelectorLibrary, jvm, activity);
-//    initJni(m_antilatencyStorageLibrary, jvm, activity);
-//    initJni(m_trackingAlignmentLibrary, jvm, activity);
-//
     auto adnJni = m_adnLibrary.queryInterface<AndroidJniWrapper::IAndroidJni>();
     LOGI("Antilatency: adn wrapped interface was taken");
 
@@ -82,17 +73,9 @@ AntilatencyManager::AntilatencyManager(JNIEnv* env, jobject activity) {
     LOGI("Antilatency: storageclient wrapped interface was taken");
     antilatencyStorageClientJni.initJni(jvm, activity);
 
-    //Set log verbosity level for Antilatency Device Network library.
-    //m_adnLibrary.setLogLevel(Antilatency::DeviceNetwork::LogLevel::Trace);
-
     LOGI("Antilatency: Device Network ver.: %s", m_adnLibrary.getVersion().data());
     auto filter = m_adnLibrary.createFilter();
     LOGI("Antilatency: Filter was created");
-
-    //Alt socket USB device ID
-//    Antilatency::DeviceNetwork::UsbDeviceFilter antilatencyUsbDeviceType;
-//    antilatencyUsbDeviceType.pid = 0x0000;
-//    antilatencyUsbDeviceType.vid = Antilatency::DeviceNetwork::UsbVendorId::Antilatency;
 
     filter.addUsbDevice(Antilatency::DeviceNetwork::Constants::AllUsbDevices);
     filter.addIpDevice(Antilatency::DeviceNetwork::Constants::AllIpDevicesIp, Antilatency::DeviceNetwork::Constants::AllIpDevicesMask);
@@ -289,7 +272,7 @@ Antilatency::Alt::Tracking::State AntilatencyManager::proceedTrackingAlignment(A
     resultState.pose.position = trackingState.pose.position;
 
     lastHMDPosition =  resultState.pose.position;
-    lastHMDRotation = resultState.pose.rotation;
+
     return resultState;
 }
 
@@ -302,7 +285,6 @@ std::optional<Antilatency::TrackingAlignment::State> AntilatencyManager::getExte
 }
 
 void AntilatencyManager::controllerRotationCorrection(Antilatency::Math::floatQ BControllerOrientation, Antilatency::Math::floatQ& correctionRotationResult){
-    lastControllerOwnRotation = BControllerOrientation;
 
     BControllerOrientation.z *= -1.0f;
     BControllerOrientation.w *= -1.0f;
@@ -339,9 +321,8 @@ const Antilatency::Math::float3 AntilatencyManager::controllerVelocityCorrection
 }
 
 const Antilatency::Math::float3 AntilatencyManager::controllerPositionCorrection(const Antilatency::Math::float3& vectorForCorrection, int controllerID){
-    Antilatency::Math::float3 result = {0,0,0};
 
-    LOGI("ControllerVectorCorrection was called");
+    Antilatency::Math::float3 result = {0,0,0};
 
     if(externalSpace.has_value() && (MathUtils::ToGLMVec3(vectorForCorrection) != MathUtils::ToGLMVec3(Antilatency::Math::float3{0,0,0}))){
         auto glmVectorBSpacePosition = MathUtils::ToGLMVec3(vectorForCorrection);
@@ -357,13 +338,6 @@ const Antilatency::Math::float3 AntilatencyManager::controllerPositionCorrection
         result.z *= -1.0f;
 
         lastControllerPositionASpace[controllerID] = result;
-
-        LOGI("Antilatency: RotationBSpace = (%f, %f, %f, %f)", glmRotationBSpace.x, glmRotationBSpace.y,glmRotationBSpace.z, glmRotationBSpace.w);
-        LOGI("Antilatency: Controller position in A space = (%f,%f,%f)", result.x, result.y, result.z);
-        LOGI("Antilatency: Controller position in B space = (%f,%f,%f)", vectorForCorrection.x, vectorForCorrection.y, vectorForCorrection.z);
-
-        LOGI("Antilatency: Headset position in A space = (%f,%f,%f)", lastHMDPosition.x, lastHMDPosition.y, lastHMDPosition.z);
-        LOGI("Antilatency: Headset position in B space = (%f,%f,%f)", lastHMDOwnPosition.x, lastHMDOwnPosition.y, lastHMDOwnPosition.z);
     }
     else{
         LOGI("Antilatency: Error, externalSpace hasn't value");
