@@ -59,4 +59,7 @@
             </intent-filter>
         </activity>
     </application>
+	<queries>
+        <package android:name="com.antilatency.antilatencyservice" />
+    </queries>
 </manifest>

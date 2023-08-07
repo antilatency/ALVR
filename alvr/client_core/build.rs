@@ -4,6 +4,8 @@ fn main() {
     let platform_name = env::var("CARGO_CFG_TARGET_OS").unwrap();
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
 
+	let antilatency_include_cpp_dir = PathBuf::from("..\\..\\android\\app\\external\\antilatency-integration\\AntilatencySDK\\Api");
+
     let cpp_paths = walkdir::WalkDir::new("cpp")
         .into_iter()
         .filter_map(|maybe_entry| maybe_entry.ok())
@@ -31,6 +33,7 @@ fn main() {
     builder = builder
         .cpp(true)
         .files(source_files_paths)
+		.include(antilatency_include_cpp_dir)
         .include("cpp")
         .include("cpp/gl_render_utils");
     if platform_name == "windows" {

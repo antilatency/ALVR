@@ -24,6 +24,8 @@ public class VRActivity extends Activity {
     static {
         System.loadLibrary("native_lib");
         System.loadLibrary("alvr_client_core");
+		System.loadLibrary("AntilatencyDeviceNetwork");
+        System.loadLibrary("AntilatencyStorageClient");
     }
 
     final static String TAG = "VRActivity";

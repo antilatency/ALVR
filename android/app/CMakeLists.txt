@@ -11,10 +11,12 @@ link_directories(../../build/alvr_client_core/${ANDROID_ABI})
 
 add_library(native_lib SHARED
         src/main/cpp/cpp_main.cpp
+		src/main/cpp/antilatency.cpp
         )
 
 include_directories(src/main/cpp)
 include_directories(../../build/alvr_client_core)
+include_directories(external/antilatency-integration/AntilatencySDK/Api)
 
 target_link_libraries(
         native_lib
