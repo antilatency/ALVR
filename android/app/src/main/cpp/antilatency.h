@@ -46,9 +46,6 @@ public:
     template<typename T, typename A>
     void setRigPose(T rigPosition, A rigRotation, double extrapolationTime);
 
-//    template<typename T, typename A>
-//    void setASpace(T position, A rotation);
-
     Antilatency::Math::floatP3Q getPlacement();
     std::optional<Antilatency::TrackingAlignment::State> getExternalSpace();
 
@@ -65,7 +62,6 @@ private:
     void updateTracker(AntilatencyTracker& tracker);
 
     Antilatency::Alt::Tracking::State proceedTrackingAlignment(AntilatencyTracker& tracker);
-    //Antilatency::Alt::Tracking::State proceedTrackingAlignment(AntilatencyTracker& tracker);
 private:
     Antilatency::DeviceNetwork::ILibrary _adnLibrary;
     Antilatency::StorageClient::ILibrary _antilatencyStorageLibrary;
@@ -74,11 +70,6 @@ private:
     Antilatency::TrackingAlignment::ILibrary _trackingAlignmentLibrary;
 
     Antilatency::Math::floatP3Q _rigPose{};
-
-//    Antilatency::Math::floatP3Q _aSpace;
-//    Antilatency::Math::floatP3Q _bSpace;
-
-    bool _altInitialPositionApplied = false;
 
     uint32_t _updateId = -1;
 
@@ -147,11 +138,5 @@ void AntilatencyManager::setRigPose(T rigPosition, A rigRotation, double extrapo
 
     _headsetTime = static_cast<float>(extrapolationTime);
 }
-
-//template<typename T, typename A>
-//void AntilatencyManager::setASpace(T position, A rotation) {
-//    _aSpace.position = MathUtils::Float3FromPosition(position);
-//    _aSpace.rotation = MathUtils::FloatFromQ(rotation);
-//}
 
 #endif // CLOUDVRCLIENT_ANTILATENCY_H
