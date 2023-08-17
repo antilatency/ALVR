@@ -49,7 +49,7 @@ If you have a version prior to v12.0 you need to launch `remove_firewall_rules.b
 
 ## Build from source
 
-You can follow the guide [here](https://github.com/alvr-org/ALVR/wiki/Building-From-Source).
+You can follow the guide [here](https://github.com/alvr-org/ALVR/wiki/Building-From-Source/9c98c186bcbf8a52ed037df6cb62bee10063d9ee).
 
 ## License
 

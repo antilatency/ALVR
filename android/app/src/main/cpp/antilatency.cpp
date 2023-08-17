@@ -155,7 +155,7 @@ void AntilatencyManager::handleNode(Antilatency::DeviceNetwork::NodeHandle node)
     try {
         std::string serialNumber = _deviceNetwork.nodeGetStringProperty(node, DeviceNetwork::Interop::Constants::HardwareSerialNumberKey);
         std::string tag = _deviceNetwork.nodeGetStringProperty(_deviceNetwork.nodeGetParent(node), "Tag");
-        if (tag == "HMD") {
+        if (tag == "HMD" || tag == "Head") {
             trackerType = AntilatencyTracker::TYPE_HMD;
         } else if (tag == "LeftHand") {
             trackerType = AntilatencyTracker::TYPE_LEFT_CONTROLLER;
@@ -168,8 +168,9 @@ void AntilatencyManager::handleNode(Antilatency::DeviceNetwork::NodeHandle node)
 
         auto cotaskConstructor = _altTrackingLibrary.createTrackingCotaskConstructor();
         auto trackingCotask = cotaskConstructor.startTask(_deviceNetwork, node, _environment);
+
         LOGI("Antilatency: cotask was started");
-        _trackers.push_back(AntilatencyTracker{trackerType, serialNumber, trackingCotask });
+        _trackers.push_back(AntilatencyTracker{trackerType, serialNumber, trackingCotask});
         LOGI("Tracking node online [%s]: %s", tag.data(), serialNumber.data());
 
     } catch (InterfaceContract::Exception &e) {
@@ -185,12 +186,24 @@ void AntilatencyManager::updateTracker(AntilatencyTracker& tracker) {
         case AntilatencyTracker::TYPE_HMD:
             _antilatencyTrackingData.head = proceedTrackingAlignment(tracker);
             break;
-        case AntilatencyTracker::TYPE_LEFT_CONTROLLER:
-            _antilatencyTrackingData.leftHand = tracker.cotask.getState(Antilatency::Alt::Tracking::Constants::DefaultAngularVelocityAvgTime);
+        case AntilatencyTracker::TYPE_LEFT_CONTROLLER: {
+            Antilatency::Math::floatP3Q placement =
+                    {
+                    {-0.035f,    -0.055f,     -0.145f},
+                    {0.8873923f, 0.07797423f, -0.1780759f, 0.4180238f}
+                    };
+            _antilatencyTrackingData.leftHand = tracker.cotask.getExtrapolatedState(placement,0);
             break;
-        case AntilatencyTracker::TYPE_RIGHT_CONTROLLER:
-            _antilatencyTrackingData.rightHand = tracker.cotask.getState(Antilatency::Alt::Tracking::Constants::DefaultAngularVelocityAvgTime);
+        }
+        case AntilatencyTracker::TYPE_RIGHT_CONTROLLER: {
+            Antilatency::Math::floatP3Q placement =
+                    {
+                    {0.035f,      -0.055f,    -0.145f},
+                    {0.02006754f, 0.8941859f, -0.4122624f, 0.2034033f}
+                    };
+            _antilatencyTrackingData.rightHand = tracker.cotask.getExtrapolatedState(placement, 0);
             break;
+        }
         default:
             break;
     }
@@ -294,7 +307,7 @@ const Antilatency::Math::float3 AntilatencyManager::controllerVelocityCorrection
     return result;
 }
 
-const Antilatency::Math::float3 AntilatencyManager::controllerPositionCorrection(const Antilatency::Math::float3& vectorForCorrection, int controllerID) {
+const Antilatency::Math::float3 AntilatencyManager::controllerPositionCorrection(const Antilatency::Math::float3& vectorForCorrection) {
     Antilatency::Math::float3 result = {0,0,0};
 
     if (_externalSpace.has_value() && (MathUtils::ToGLMVec3(vectorForCorrection) != MathUtils::ToGLMVec3(Antilatency::Math::float3{0, 0, 0}))) {
@@ -315,4 +328,10 @@ const Antilatency::Math::float3 AntilatencyManager::controllerPositionCorrection
     }
 
     return result;
+}
+
+void AntilatencyManager::correctPositionAndRotation(Antilatency::Alt::Tracking::State& state) {
+    state.pose.position.z *= -1.0f;
+    state.pose.rotation.w *= -1.0f;
+    state.pose.rotation.z *= -1.0f;
 }

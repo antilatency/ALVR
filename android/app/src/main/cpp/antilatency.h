@@ -29,6 +29,17 @@ struct AntilatencyTracker {
     Antilatency::Alt::Tracking::ITrackingCotask cotask;
 };
 
+struct AntilatencyBracer {
+    enum {
+        TYPE_UNKNOWN,
+        TYPE_LEFT_CONTROLLER,
+        TYPE_RIGHT_CONTROLLER
+    };
+    uint8_t type;
+    std::string serialNumber;
+    Antilatency::Bracer::ICotask cotask;
+};
+
 struct AntilatencyTrackingData {
     Antilatency::Alt::Tracking::State head;
     Antilatency::Alt::Tracking::State leftHand;
@@ -41,7 +52,7 @@ public:
 
     inline const AntilatencyTrackingData& getTrackingData();
 
-    inline bool okHead();
+    inline bool okTracker(const std::function<bool(AntilatencyTracker&)>& predicate);
 
     template<typename T, typename A>
     void setRigPose(T rigPosition, A rigRotation, double extrapolationTime);
@@ -49,8 +60,9 @@ public:
     Antilatency::Math::floatP3Q getPlacement();
     std::optional<Antilatency::TrackingAlignment::State> getExternalSpace();
 
+    void correctPositionAndRotation(Antilatency::Alt::Tracking::State& state);
     void controllerRotationCorrection(Antilatency::Math::floatQ BControllerOrientation, Antilatency::Math::floatQ& correctionRotationResult);
-    const Antilatency::Math::float3 controllerPositionCorrection(const Antilatency::Math::float3& vectorForCorrection, int controllerID);
+    const Antilatency::Math::float3 controllerPositionCorrection(const Antilatency::Math::float3& vectorForCorrection);
     const Antilatency::Math::float3 controllerVelocityCorrection(const Antilatency::Math::float3& vectorForCorrection);
 private:
     bool loadLibraries();
@@ -58,8 +70,10 @@ private:
     void updateNodes();
 
     void handleNode(Antilatency::DeviceNetwork::NodeHandle node);
+    void handleBracerNode(Antilatency::DeviceNetwork::NodeHandle node);
 
     void updateTracker(AntilatencyTracker& tracker);
+    void updateBracer(AntilatencyBracer& bracer);
 
     Antilatency::Alt::Tracking::State proceedTrackingAlignment(AntilatencyTracker& tracker);
 private:
@@ -89,6 +103,7 @@ private:
     AntilatencyTrackingData _antilatencyTrackingData{};
 
     std::vector<AntilatencyTracker> _trackers;
+    std::vector<AntilatencyBracer> _bracers;
     std::optional<Antilatency::TrackingAlignment::State> _externalSpace;
 
     Antilatency::Math::float3 _lastHMDOwnPosition{};
@@ -97,17 +112,16 @@ private:
     Antilatency::Math::float3 _positionOffset{};
 };
 
-const AntilatencyTrackingData &AntilatencyManager::getTrackingData() {
+const AntilatencyTrackingData& AntilatencyManager::getTrackingData() {
     updateNodes();
     return _antilatencyTrackingData;
 }
 
-bool AntilatencyManager::okHead() {
+bool AntilatencyManager::okTracker(const std::function<bool(AntilatencyTracker&)>& predicate) {
     auto foundTracker = std::find_if(_trackers.begin(),
                                      _trackers.end(),
-                                     [](AntilatencyTracker& tracker)
-                                     { return tracker.type == tracker.TYPE_HMD;}
-                                     );
+                                     predicate
+    );
 
     if (foundTracker == _trackers.end()) {
         return false;
@@ -117,10 +131,7 @@ bool AntilatencyManager::okHead() {
         } else {
             auto state = foundTracker->cotask.getState(Antilatency::Alt::Tracking::Constants::DefaultAngularVelocityAvgTime);
 
-//            return state.stability.stage == Antilatency::Alt::Tracking::Stage::Tracking6Dof
-//            || state.stability.stage == Antilatency::Alt::Tracking::Stage::TrackingBlind6Dof;
-
-            return state.stability.stage == Antilatency::Alt::Tracking::Stage::InertialDataInitialization;
+            return state.stability.stage != Antilatency::Alt::Tracking::Stage::InertialDataInitialization;
         }
     }
 }

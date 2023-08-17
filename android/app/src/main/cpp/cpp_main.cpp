@@ -132,6 +132,19 @@ public:
     bool altManagerCreated = false;
 	std::shared_ptr<AntilatencyManager> altManager;
 
+    struct motionDataHead {
+        ovrVector3f Position;
+        ovrQuatf Orientation;
+        double PredictionInSeconds;
+    } headMotionData;
+
+    struct motionDataTracking {
+        ovrQuatf Orientation;
+        ovrVector3f Position;
+        ovrVector3f AngularVelocity;
+        ovrVector3f LinearVelocity;
+    } trackingMotionData[2];
+
     float lastIpd;
     EyeFov lastFov;
 
@@ -149,6 +162,75 @@ public:
 };
 
 NativeContext CTX = {};
+
+void antilatencyMemcpy(AlvrDeviceMotion& motion, Antilatency::Alt::Tracking::State& state) {
+    memcpy(&motion.orientation, &state.pose.rotation, 4 * 4);
+    memcpy(motion.position, &state.pose.position, 4 * 3);
+    memcpy(motion.linear_velocity, &state.velocity, 4 * 3);
+    memcpy(motion.angular_velocity, &state.localAngularVelocity, 4 * 3);
+}
+
+void antilatencyMemcpy(AlvrDeviceMotion& motion, int index) {
+    Antilatency::Math::floatQ correctedSpace;
+    CTX.altManager->controllerRotationCorrection(MathUtils::FloatFromQ(CTX.trackingMotionData[index].Orientation), correctedSpace);
+    auto correctedPosition = CTX.altManager->controllerPositionCorrection(MathUtils::Float3FromPosition(CTX.trackingMotionData[index].Position));
+    auto correctedAngularVelocity = CTX.altManager->controllerVelocityCorrection(MathUtils::Float3FromPosition(CTX.trackingMotionData[index].AngularVelocity));
+    auto linearVelocityCorrection = CTX.altManager->controllerVelocityCorrection(MathUtils::Float3FromPosition(CTX.trackingMotionData[index].LinearVelocity));
+
+    memcpy(&motion.orientation, &correctedSpace, sizeof(correctedSpace));
+    memcpy(motion.position, &correctedPosition, sizeof(ovrVector3f));
+    memcpy(motion.angular_velocity, &correctedAngularVelocity, sizeof(CTX.trackingMotionData[1].AngularVelocity));
+    memcpy(motion.linear_velocity, &linearVelocityCorrection, sizeof(CTX.trackingMotionData[1].LinearVelocity));
+}
+
+void antilatencyHead(AlvrDeviceMotion& motion,  Antilatency::Alt::Tracking::State& state) {
+    if (CTX.altManager->okTracker([](AntilatencyTracker &tracker) { return tracker.type == tracker.TYPE_HMD; })) {
+        memcpy(motion.position, &state.pose.position, sizeof(ovrVector3f));
+        memcpy(&motion.orientation, &state.pose.rotation, sizeof(ovrQuatf));
+    }
+}
+
+void antilatencyHand(AlvrDeviceMotion& motion, int index) {
+    auto predicate = index ? [](AntilatencyTracker& tracker){return tracker.type == tracker.TYPE_RIGHT_CONTROLLER;}
+    : [](AntilatencyTracker& tracker){return tracker.type == tracker.TYPE_LEFT_CONTROLLER;} ;
+
+    if (CTX.altManager->okTracker(predicate)) {
+        auto bracer = index ? CTX.altManager->getTrackingData().rightHand : CTX.altManager->getTrackingData().leftHand;
+        CTX.altManager->correctPositionAndRotation(bracer);
+        antilatencyMemcpy(motion, bracer);
+    } else {
+        if (!CTX.altManager->okTracker([](AntilatencyTracker& tracker) { return tracker.type == tracker.TYPE_HMD; }))
+            return;
+
+        antilatencyMemcpy(motion, index);
+    }
+}
+
+void antilatencyPatchToPlay(std::vector<AlvrDeviceMotion>& vec) {
+    if (!CTX.altManagerCreated)
+        return;
+
+    CTX.altManager->setRigPose(CTX.headMotionData.Position,
+                               CTX.headMotionData.Orientation,
+                               CTX.headMotionData.PredictionInSeconds
+                               );
+    auto head = CTX.altManager->getTrackingData().head;
+    CTX.altManager->correctPositionAndRotation(head);
+
+    for (auto &motion : vec) {
+        if (motion.device_id == HEAD_ID) {
+            antilatencyHead(motion, head);
+        }
+
+        if (motion.device_id == LEFT_HAND_ID) {
+            antilatencyHand(motion, 0);
+        }
+
+        if (motion.device_id == RIGHT_HAND_ID) {
+            antilatencyHand(motion, 1);
+        }
+    }
+}
 
 static const char *EglErrorString(const EGLint err) {
     switch (err) {
@@ -595,29 +677,14 @@ void eventsThread() {
 
             // Note: do not copy velocities. Avoid reprojection in SteamVR
 
-            auto position = headTracking.HeadPose.Pose.Position;
-            auto rotation = headTracking.HeadPose.Pose.Orientation;
-            auto extrapolationTime = headTracking.HeadPose.PredictionInSeconds;
+            CTX.headMotionData =
+                    {headTracking.HeadPose.Pose.Position,
+                     headTracking.HeadPose.Pose.Orientation,
+                     headTracking.HeadPose.PredictionInSeconds
+                    };
 
-            if (CTX.altManagerCreated) {
-                CTX.altManager->setRigPose(position, rotation, extrapolationTime);
-                auto altPose = CTX.altManager->getTrackingData().head.pose;
-
-                altPose.position.z *= -1.0f;
-
-                altPose.rotation.w *= -1.0f;
-                altPose.rotation.z *= -1.0f;
-
-                if (CTX.altManager->okHead()) {
-                    memcpy(headMotion.position, &altPose.position, sizeof(ovrVector3f));
-                    memcpy(&headMotion.orientation, &altPose.rotation, sizeof(ovrQuatf));
-                }
-            }
-
-            if (!CTX.altManagerCreated || !CTX.altManager->okHead()) {
-                memcpy(headMotion.position, &headTracking.HeadPose.Pose.Position, 4 * 3);
-                memcpy(&headMotion.orientation, &headTracking.HeadPose.Pose.Orientation, 4 * 4);
-            }
+            memcpy(headMotion.position, &headTracking.HeadPose.Pose.Position, 4 * 3);
+            memcpy(&headMotion.orientation, &headTracking.HeadPose.Pose.Orientation, 4 * 4);
 
             motionVec.push_back(headMotion);
 
@@ -662,44 +729,22 @@ void eventsThread() {
                                                     &tracking) == ovrSuccess) {
                         if (((tracking.Status & VRAPI_TRACKING_STATUS_POSITION_VALID) &&
                              (tracking.Status & VRAPI_TRACKING_STATUS_ORIENTATION_VALID)) ||
-                            (capabilities.ControllerCapabilities &
+                             (capabilities.ControllerCapabilities &
                              ovrControllerCaps_ModelOculusGo)) {
                             AlvrDeviceMotion motion = {};
                             motion.device_id = handID;
 
-                            if (CTX.altManagerCreated && CTX.altManager->okHead()) {
-                                Antilatency::Math::floatQ correctedSpace;
-                                CTX.altManager->controllerRotationCorrection(
-                                        MathUtils::FloatFromQ(tracking.HeadPose.Pose.Orientation),
-                                        correctedSpace);
-                                memcpy(&motion.orientation,&correctedSpace,sizeof(correctedSpace));
+                            int index = handID == LEFT_HAND_ID ? 0 : 1;
 
-                                int controller = handID == LEFT_HAND_ID ? 0 : 1;
-                                auto correctedPosition =
-                                        CTX.altManager->controllerPositionCorrection(
-                                                MathUtils::Float3FromPosition(
-                                                        tracking.HeadPose.Pose.Position),
-                                                        controller);
+                            CTX.trackingMotionData[index] = {tracking.HeadPose.Pose.Orientation,
+                                                      tracking.HeadPose.Pose.Position,
+                                                      tracking.HeadPose.AngularVelocity,
+                                                      tracking.HeadPose.LinearVelocity};
 
-                                memcpy(motion.position,&correctedPosition,sizeof(ovrVector3f));
-
-                                auto correctedAngularVelocity =
-                                        CTX.altManager->controllerVelocityCorrection(
-                                                MathUtils::Float3FromPosition(
-                                                        tracking.HeadPose.AngularVelocity));
-                                memcpy(&motion.angular_velocity,&correctedAngularVelocity,sizeof(tracking.HeadPose.AngularVelocity));
-
-                                auto linearVelocityCorrection =
-                                        CTX.altManager->controllerVelocityCorrection(
-                                                MathUtils::Float3FromPosition(
-                                                        tracking.HeadPose.LinearVelocity));
-                                memcpy(&motion.linear_velocity,&linearVelocityCorrection,sizeof(tracking.HeadPose.LinearVelocity));
-                            } else {
-                                memcpy(motion.position,&tracking.HeadPose.Pose.Position,4 * 3);
-                                memcpy(&motion.orientation,&tracking.HeadPose.Pose.Orientation,4 * 4);
-                                memcpy(motion.linear_velocity, &tracking.HeadPose.LinearVelocity, 4 * 3);
-                                memcpy(motion.angular_velocity, &tracking.HeadPose.AngularVelocity, 4 * 3);
-                            }
+                            memcpy(&motion.orientation, &tracking.HeadPose.Pose.Orientation, 4 * 4);
+                            memcpy(motion.position, &tracking.HeadPose.Pose.Position, 4 * 3);
+                            memcpy(motion.linear_velocity, &tracking.HeadPose.LinearVelocity, 4 * 3);
+                            memcpy(motion.angular_velocity, &tracking.HeadPose.AngularVelocity, 4 * 3);
 
                             motionVec.push_back(motion);
                         }
@@ -731,9 +776,11 @@ void eventsThread() {
                         (handPose.Status & ovrHandTrackingStatus_Tracked)) {
                         AlvrDeviceMotion motion = {};
                         motion.device_id = handID;
+
                         memcpy(&motion.orientation, &handPose.RootPose.Orientation, 4 * 4);
                         memcpy(motion.position, &handPose.RootPose.Position, 4 * 3);
                         // Note: ovrHandPose does not have velocities
+
                         for (int i = 0; i < ovrHandBone_MaxSkinnable; i++) {
                             memcpy(&handRef->bone_rotations[i], &handPose.BoneRotations[i], 4 * 4);
                         }
@@ -741,9 +788,10 @@ void eventsThread() {
                         handRef->enabled = true;
                     }
                 }
-
                 deviceIndex++;
             }
+
+            antilatencyPatchToPlay(motionVec);
 
             alvr_send_tracking(targetTimestampNs, &motionVec[0], motionVec.size(), leftHand,
                                rightHand);
