@@ -130,7 +130,7 @@ public:
     uint8_t lastRightControllerBattery = 0;
 
     bool altManagerCreated = false;
-	std::shared_ptr<AntilatencyManager> altManager;
+    std::shared_ptr<AntilatencyManager> altManager;
 
     struct motionDataHead {
         ovrVector3f Position;
@@ -179,8 +179,8 @@ void antilatencyMemcpy(AlvrDeviceMotion& motion, int index) {
 
     memcpy(&motion.orientation, &correctedSpace, sizeof(correctedSpace));
     memcpy(motion.position, &correctedPosition, sizeof(ovrVector3f));
-    memcpy(motion.angular_velocity, &correctedAngularVelocity, sizeof(CTX.trackingMotionData[1].AngularVelocity));
-    memcpy(motion.linear_velocity, &linearVelocityCorrection, sizeof(CTX.trackingMotionData[1].LinearVelocity));
+    memcpy(motion.angular_velocity, &correctedAngularVelocity, sizeof(CTX.trackingMotionData[index].AngularVelocity));
+    memcpy(motion.linear_velocity, &linearVelocityCorrection, sizeof(CTX.trackingMotionData[index].LinearVelocity));
 }
 
 void antilatencyHead(AlvrDeviceMotion& motion,  Antilatency::Alt::Tracking::State& state) {
@@ -192,7 +192,7 @@ void antilatencyHead(AlvrDeviceMotion& motion,  Antilatency::Alt::Tracking::Stat
 
 void antilatencyHand(AlvrDeviceMotion& motion, int index) {
     auto predicate = index ? [](AntilatencyTracker& tracker){return tracker.type == tracker.TYPE_RIGHT_CONTROLLER;}
-    : [](AntilatencyTracker& tracker){return tracker.type == tracker.TYPE_LEFT_CONTROLLER;} ;
+                           : [](AntilatencyTracker& tracker){return tracker.type == tracker.TYPE_LEFT_CONTROLLER;} ;
 
     if (CTX.altManager->okTracker(predicate)) {
         auto bracer = index ? CTX.altManager->getTrackingData().rightHand : CTX.altManager->getTrackingData().leftHand;
@@ -213,7 +213,7 @@ void antilatencyPatchToPlay(std::vector<AlvrDeviceMotion>& vec) {
     CTX.altManager->setRigPose(CTX.headMotionData.Position,
                                CTX.headMotionData.Orientation,
                                CTX.headMotionData.PredictionInSeconds
-                               );
+    );
     auto head = CTX.altManager->getTrackingData().head;
     CTX.altManager->correctPositionAndRotation(head);
 
@@ -462,9 +462,20 @@ void updateButtons() {
                 updateBinary(Y_TOUCH_ID, inputState.Touches & ovrTouch_Y);
                 updateBinary(LEFT_SQUEEZE_CLICK_ID, inputState.Buttons & ovrButton_GripTrigger);
                 updateScalar(LEFT_SQUEEZE_VALUE_ID, inputState.GripTrigger);
-                updateBinary(LEFT_TRIGGER_CLICK_ID, inputState.Buttons & ovrButton_Trigger);
-                updateScalar(LEFT_TRIGGER_VALUE_ID, inputState.IndexTrigger);
-                updateBinary(LEFT_TRIGGER_TOUCH_ID, inputState.Touches & ovrTouch_IndexTrigger);
+
+                ////////////////////////////////////////////////////////////////////////////////////////////////
+//                if (CTX.altManagerCreated && CTX.altManager->getTrackingData().leftClick) {
+//                    LOGI("if (CTX.altManagerCreated && CTX.altManager->getTrackingData().leftClick)");
+//                    updateBinary(LEFT_TRIGGER_CLICK_ID, ovrButton_Trigger & ovrButton_Trigger); // or just ovrButton_Trigger
+//                    updateScalar(LEFT_TRIGGER_VALUE_ID,CTX.altManager->getTrackingData().leftTouch);
+//                } else {
+                    LOGI("else (CTX.altManagerCreated && CTX.altManager->getTrackingData().leftClick)");
+                    updateBinary(LEFT_TRIGGER_CLICK_ID, inputState.Buttons & ovrButton_Trigger);
+                    updateScalar(LEFT_TRIGGER_VALUE_ID, inputState.IndexTrigger);
+                    updateBinary(LEFT_TRIGGER_TOUCH_ID, inputState.Touches & ovrTouch_IndexTrigger);
+               // }
+                ////////////////////////////////////////////////////////////////////////////////////////////////
+
                 updateScalar(LEFT_THUMBSTICK_X_ID, inputState.Joystick.x);
                 updateScalar(LEFT_THUMBSTICK_Y_ID, inputState.Joystick.y);
                 updateBinary(LEFT_THUMBSTICK_CLICK_ID, inputState.Buttons & ovrButton_Joystick);
@@ -477,9 +488,18 @@ void updateButtons() {
                 updateBinary(B_TOUCH_ID, inputState.Touches & ovrTouch_B);
                 updateBinary(RIGHT_SQUEEZE_CLICK_ID, inputState.Buttons & ovrButton_GripTrigger);
                 updateScalar(RIGHT_SQUEEZE_VALUE_ID, inputState.GripTrigger);
-                updateBinary(RIGHT_TRIGGER_CLICK_ID, inputState.Buttons & ovrButton_Trigger);
-                updateScalar(RIGHT_TRIGGER_VALUE_ID, inputState.IndexTrigger);
-                updateBinary(RIGHT_TRIGGER_TOUCH_ID, inputState.Touches & ovrTouch_IndexTrigger);
+
+                ////////////////////////////////////////////////////////////////////////////////////////////////
+//                if (CTX.altManagerCreated && CTX.altManager->getTrackingData().rightClick) {
+//                    updateBinary(RIGHT_TRIGGER_CLICK_ID, ovrButton_Trigger & ovrButton_Trigger); // or just ovrButton_Trigger
+//                    updateScalar(RIGHT_TRIGGER_VALUE_ID, CTX.altManager->getTrackingData().rightTouch);
+               // } else {
+                    updateBinary(RIGHT_TRIGGER_CLICK_ID, inputState.Buttons & ovrButton_Trigger);
+                    updateScalar(RIGHT_TRIGGER_VALUE_ID, inputState.IndexTrigger);
+                    updateBinary(RIGHT_TRIGGER_TOUCH_ID, inputState.Touches & ovrTouch_IndexTrigger);
+                //}
+                ////////////////////////////////////////////////////////////////////////////////////////////////
+
                 updateScalar(RIGHT_THUMBSTICK_X_ID, inputState.Joystick.x);
                 updateScalar(RIGHT_THUMBSTICK_Y_ID, inputState.Joystick.y);
                 updateBinary(RIGHT_THUMBSTICK_CLICK_ID, inputState.Buttons & ovrButton_Joystick);
@@ -729,7 +749,7 @@ void eventsThread() {
                                                     &tracking) == ovrSuccess) {
                         if (((tracking.Status & VRAPI_TRACKING_STATUS_POSITION_VALID) &&
                              (tracking.Status & VRAPI_TRACKING_STATUS_ORIENTATION_VALID)) ||
-                             (capabilities.ControllerCapabilities &
+                            (capabilities.ControllerCapabilities &
                              ovrControllerCaps_ModelOculusGo)) {
                             AlvrDeviceMotion motion = {};
                             motion.device_id = handID;
@@ -737,9 +757,9 @@ void eventsThread() {
                             int index = handID == LEFT_HAND_ID ? 0 : 1;
 
                             CTX.trackingMotionData[index] = {tracking.HeadPose.Pose.Orientation,
-                                                      tracking.HeadPose.Pose.Position,
-                                                      tracking.HeadPose.AngularVelocity,
-                                                      tracking.HeadPose.LinearVelocity};
+                                                             tracking.HeadPose.Pose.Position,
+                                                             tracking.HeadPose.AngularVelocity,
+                                                             tracking.HeadPose.LinearVelocity};
 
                             memcpy(&motion.orientation, &tracking.HeadPose.Pose.Orientation, 4 * 4);
                             memcpy(motion.position, &tracking.HeadPose.Pose.Position, 4 * 3);

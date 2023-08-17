@@ -29,21 +29,26 @@ struct AntilatencyTracker {
     Antilatency::Alt::Tracking::ITrackingCotask cotask;
 };
 
-struct AntilatencyBracer {
-    enum {
-        TYPE_UNKNOWN,
-        TYPE_LEFT_CONTROLLER,
-        TYPE_RIGHT_CONTROLLER
-    };
-    uint8_t type;
-    std::string serialNumber;
-    Antilatency::Bracer::ICotask cotask;
-};
+//struct AntilatencyBracer {
+//    enum {
+//        TYPE_UNKNOWN,
+//        TYPE_LEFT_CONTROLLER,
+//        TYPE_RIGHT_CONTROLLER
+//    };
+//    uint8_t type;
+//    std::string serialNumber;
+//    Antilatency::Bracer::ICotask cotask;
+//};
 
 struct AntilatencyTrackingData {
     Antilatency::Alt::Tracking::State head;
     Antilatency::Alt::Tracking::State leftHand;
     Antilatency::Alt::Tracking::State rightHand;
+    ////////////////////////////////////////////
+//    bool rightClick;
+//    bool leftClick;
+//    float rightTouch;
+//    float leftTouch;
 };
 
 class AntilatencyManager {
@@ -70,10 +75,10 @@ private:
     void updateNodes();
 
     void handleNode(Antilatency::DeviceNetwork::NodeHandle node);
-    void handleBracerNode(Antilatency::DeviceNetwork::NodeHandle node);
+    //void handleBracerNode(Antilatency::DeviceNetwork::NodeHandle node);
 
     void updateTracker(AntilatencyTracker& tracker);
-    void updateBracer(AntilatencyBracer& bracer);
+    //void updateBracer(AntilatencyBracer& bracer);
 
     Antilatency::Alt::Tracking::State proceedTrackingAlignment(AntilatencyTracker& tracker);
 private:
@@ -82,6 +87,7 @@ private:
     Antilatency::Alt::Environment::Selector::ILibrary _environmentSelectorLibrary;
     Antilatency::Alt::Tracking::ILibrary _altTrackingLibrary;
     Antilatency::TrackingAlignment::ILibrary _trackingAlignmentLibrary;
+    //Antilatency::Bracer::ILibrary _bracerLibrary;
 
     Antilatency::Math::floatP3Q _rigPose{};
 
@@ -103,7 +109,7 @@ private:
     AntilatencyTrackingData _antilatencyTrackingData{};
 
     std::vector<AntilatencyTracker> _trackers;
-    std::vector<AntilatencyBracer> _bracers;
+    //std::vector<AntilatencyBracer> _bracers;
     std::optional<Antilatency::TrackingAlignment::State> _externalSpace;
 
     Antilatency::Math::float3 _lastHMDOwnPosition{};

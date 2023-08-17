@@ -108,6 +108,9 @@ bool AntilatencyManager::loadLibraries() {
         _trackingAlignmentLibrary = InterfaceContract::getLibraryInterface<TrackingAlignment::ILibrary>(
                 "libAntilatencyTrackingAlignment.so");
         LOGI("Antilatency: AltTrackingAlignment library was created");
+
+//        _bracerLibrary = InterfaceContract::getLibraryInterface<Bracer::ILibrary>("libAntilatencyBracer.so");
+//        LOGI("Antilatency: Bracer library was created");
     } catch (std::exception& exception) {
         LOGE("Antilatency: Exception in loadLibraries: %s", exception.what());
         return false;
@@ -135,6 +138,18 @@ void AntilatencyManager:: updateNodes() {
                 handleNode(node);
             }
         }
+
+//        ////////////////////////////////////////////////////////////////////////////////////////////
+//        auto bracerCotaskConstructor = _bracerLibrary.getCotaskConstructor();
+//        auto bracerNodes = bracerCotaskConstructor.findSupportedNodes(_deviceNetwork);
+//        for (auto node : bracerNodes) {
+//            //  LOGI("FOR BRACER NODES");
+//            //Check if node is idle, we cannot start task on invalid nodes or on nodes that already has task started on it.
+//            if (_deviceNetwork.nodeGetStatus(node) == Antilatency::DeviceNetwork::NodeStatus::Idle) {
+//                handleBracerNode(node);
+//            }
+//        }
+//        ////////////////////////////////////////////////////////////////////////////////////////////
     }
 
     auto rmIter = std::remove_if(_trackers.begin(), _trackers.end(), [this](AntilatencyTracker& tracker) {
@@ -147,7 +162,20 @@ void AntilatencyManager:: updateNodes() {
         }
     });
 
+//    auto rmIterBracer = std::remove_if(_bracers.begin(), _bracers.end(), [this](AntilatencyBracer& bracer) {
+//        if (bracer.cotask.isTaskFinished()) {
+//            LOGI("Tracking node offline: %s", bracer.serialNumber.data());
+//            //LOGI("if rmIterBracer");
+//            return true;
+//        } else {
+//            LOGI("else updateBracer");
+//            updateBracer(bracer);
+//            return false;
+//        }
+//    });
+
     _trackers.erase(rmIter, _trackers.end());
+ //   _bracers.erase(rmIterBracer, _bracers.end());
 }
 
 void AntilatencyManager::handleNode(Antilatency::DeviceNetwork::NodeHandle node) {
@@ -178,6 +206,33 @@ void AntilatencyManager::handleNode(Antilatency::DeviceNetwork::NodeHandle node)
     }
 }
 
+//void AntilatencyManager::handleBracerNode(Antilatency::DeviceNetwork::NodeHandle node) {
+//    LOGI("handleBracerNode");
+//    uint8_t trackerType = AntilatencyBracer::TYPE_UNKNOWN;
+//    try {
+//        std::string serialNumber = _deviceNetwork.nodeGetStringProperty(node,DeviceNetwork::Interop::Constants::HardwareSerialNumberKey);
+//        //std::string tag = _deviceNetwork.nodeGetStringProperty(_deviceNetwork.nodeGetParent(node),"Tag");
+//        std::string tag = _deviceNetwork.nodeGetStringProperty(node, "Tag");
+//        if (tag == "LeftHand") {
+//            // LOGI("tag LEFTHAND");
+//            trackerType = AntilatencyBracer::TYPE_LEFT_CONTROLLER;
+//        } else if (tag == "RightHand") {
+//            // LOGI("tag RIGHTHAND");
+//            trackerType = AntilatencyBracer::TYPE_RIGHT_CONTROLLER;
+//        } else {
+//            LOGE("Unknown tag: %s", tag.data());
+//            return;
+//        }
+//
+//        auto cotaskConstructorBracer = _bracerLibrary.getCotaskConstructor();
+//        auto bracerCotask = cotaskConstructorBracer.startTask(_deviceNetwork, node);
+//
+//        _bracers.push_back(AntilatencyBracer{trackerType, serialNumber, bracerCotask});
+//    } catch (InterfaceContract::Exception& e) {
+//        LOGE("Handle node failed: %s", e.message().data());
+//    }
+//}
+
 void AntilatencyManager::updateTracker(AntilatencyTracker& tracker) {
     if (tracker.cotask.isTaskFinished()) {
         return;
@@ -189,8 +244,8 @@ void AntilatencyManager::updateTracker(AntilatencyTracker& tracker) {
         case AntilatencyTracker::TYPE_LEFT_CONTROLLER: {
             Antilatency::Math::floatP3Q placement =
                     {
-                    {-0.035f,    -0.055f,     -0.145f},
-                    {0.8873923f, 0.07797423f, -0.1780759f, 0.4180238f}
+                            {-0.035f,    -0.055f,     -0.145f},
+                            {0.8873923f, 0.07797423f, -0.1780759f, 0.4180238f}
                     };
             _antilatencyTrackingData.leftHand = tracker.cotask.getExtrapolatedState(placement,0);
             break;
@@ -198,8 +253,8 @@ void AntilatencyManager::updateTracker(AntilatencyTracker& tracker) {
         case AntilatencyTracker::TYPE_RIGHT_CONTROLLER: {
             Antilatency::Math::floatP3Q placement =
                     {
-                    {0.035f,      -0.055f,    -0.145f},
-                    {0.02006754f, 0.8941859f, -0.4122624f, 0.2034033f}
+                            {0.035f,      -0.055f,    -0.145f},
+                            {0.02006754f, 0.8941859f, -0.4122624f, 0.2034033f}
                     };
             _antilatencyTrackingData.rightHand = tracker.cotask.getExtrapolatedState(placement, 0);
             break;
@@ -208,6 +263,30 @@ void AntilatencyManager::updateTracker(AntilatencyTracker& tracker) {
             break;
     }
 }
+
+//void AntilatencyManager::updateBracer(AntilatencyBracer& bracer) {
+//    LOGI("updateBracer");
+//
+//    if (bracer.cotask.isTaskFinished())
+//        return;
+//
+//    switch (bracer.type) {
+//        case AntilatencyBracer::TYPE_LEFT_CONTROLLER: {
+//            _antilatencyTrackingData.leftTouch = bracer.cotask.getTouch(0);
+//            _antilatencyTrackingData.leftClick = _antilatencyTrackingData.rightTouch >= 0.6;
+//
+//            //LOGI("updateBracer. LEFT. Touch: %f", _antilatencyTrackingData.leftTouch);
+//        } break;
+//        case AntilatencyBracer::TYPE_RIGHT_CONTROLLER: {
+//            _antilatencyTrackingData.rightTouch = bracer.cotask.getTouch(0);
+//            _antilatencyTrackingData.rightClick = _antilatencyTrackingData.rightTouch >= 0.6;
+//
+//            //LOGI("updateBracer. RIGHT. Touch: %f", _antilatencyTrackingData.rightTouch);
+//        }
+//        default:
+//            break;
+//    }
+//}
 
 Antilatency::Alt::Tracking::State AntilatencyManager::proceedTrackingAlignment(AntilatencyTracker& tracker) {
     if (!tracker.cotask) {
