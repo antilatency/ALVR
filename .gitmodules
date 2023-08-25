@@ -1,4 +1,0 @@
-[submodule "android/app/external/antilatency-integration/AntilatencySdk"]
-	path = android/app/external/antilatency-integration/AntilatencySdk
-	url = https://github.com/AntilatencySDK/Release_4.0.1.git
-	branch = subset-39e68ba289c905cb91fc6c0ab3455a017d9f1513
